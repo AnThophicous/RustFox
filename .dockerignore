@@ -1,0 +1,10 @@
+.git
+.github
+build
+build-*
+*.o
+*.a
+*.gguf
+*.foxpack
+docs
+models

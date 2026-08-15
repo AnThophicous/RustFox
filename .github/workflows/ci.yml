@@ -1,0 +1,178 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: linux ${{ matrix.cc }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cc: [gcc, clang]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: configure
+        env:
+          CC: ${{ matrix.cc }}
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DFOX_WERROR=ON
+
+      - name: build
+        run: cmake --build build -j "$(nproc)"
+
+      - name: test
+        run: ctest --test-dir build --output-on-failure
+
+      - name: probe
+        run: ./build/fox probe --bench
+
+      - name: watch
+        run: ./build/fox watch --seconds 3 --interval 200
+
+      - name: json is parseable
+        run: ./build/fox probe --json | python3 -m json.tool > /dev/null
+
+  linux-arm64:
+    name: linux arm64
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DFOX_WERROR=ON
+      - name: build
+        run: cmake --build build -j "$(nproc)"
+      - name: test
+        run: ctest --test-dir build --output-on-failure
+      - name: probe
+        run: ./build/fox probe --bench
+
+  musl-static:
+    name: musl static
+    runs-on: ubuntu-latest
+    container: alpine:3.20
+    steps:
+      - name: deps
+        run: apk add --no-cache build-base cmake git python3
+
+      - uses: actions/checkout@v4
+
+      - name: configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DFOX_WERROR=ON -DFOX_STATIC=ON
+
+      - name: build
+        run: cmake --build build -j "$(nproc)"
+
+      - name: test
+        run: ctest --test-dir build --output-on-failure
+
+      - name: binary is actually static
+        run: |
+          file build/fox
+          file build/fox | grep -q "statically linked"
+
+      - name: probe
+        run: ./build/fox probe --bench
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fox-linux-x86_64-musl
+          path: build/fox
+
+  windows:
+    name: windows msvc
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: configure
+        run: cmake -S . -B build -DFOX_WERROR=ON
+      - name: build
+        run: cmake --build build --config Release
+      - name: test
+        run: ctest --test-dir build -C Release --output-on-failure
+      - name: probe
+        run: .\build\Release\fox.exe probe
+
+  macos:
+    name: macos clang
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DFOX_WERROR=ON
+      - name: build
+        run: cmake --build build -j "$(sysctl -n hw.ncpu)"
+      - name: test
+        run: ctest --test-dir build --output-on-failure
+      - name: probe
+        run: ./build/fox probe --bench
+
+  sanitizers:
+    name: asan + ubsan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: configure
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all"
+      - name: build
+        run: cmake --build build -j "$(nproc)"
+      - name: test
+        run: ctest --test-dir build --output-on-failure
+      - name: probe under sanitizers
+        run: ./build/fox probe --bench
+      - name: watch under sanitizers
+        run: ./build/fox watch --seconds 3 --interval 200
+
+  container-awareness:
+    name: sees the container limit, not the host
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: build image
+        run: docker build -f docker/Dockerfile -t rustfox:ci .
+
+      - name: probe inside a 512 MiB container
+        run: |
+          docker run --rm --memory=512m --memory-swap=512m \
+            rustfox:ci probe --json > probe.json
+          cat probe.json | python3 -m json.tool
+
+      - name: assert the cgroup limit is what we set
+        run: |
+          python3 - <<'PY'
+          import json, sys
+          d = json.load(open('probe.json'))
+          mem = d['memory']
+          want = 512 * 1024 * 1024
+
+          if not mem['in_container']:
+              sys.exit('probe did not notice it was in a container')
+          if mem['cgroup_version'] != 2:
+              sys.exit(f"expected cgroup v2, got {mem['cgroup_version']}")
+          if mem['cgroup_limit'] != want:
+              sys.exit(f"cgroup_limit {mem['cgroup_limit']} != {want}")
+          if mem['total_bytes'] != want:
+              sys.exit(f"total_bytes {mem['total_bytes']} != {want}; "
+                       "the probe is reporting host memory")
+          if mem['available_bytes'] > want:
+              sys.exit('available exceeds the container limit')
+
+          print('ok: probe reports the 512 MiB container limit, not host RAM')
+          PY
+
+      - name: governor runs clean inside the container
+        run: |
+          docker run --rm --memory=512m --memory-swap=512m \
+            rustfox:ci watch --seconds 5 --interval 250
