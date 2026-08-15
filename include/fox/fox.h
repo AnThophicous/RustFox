@@ -293,6 +293,8 @@ fox_status fox_tq1_dot_i8(const int8_t *activations, const void *block_data,
                           size_t n, float *out);
 fox_status fox_tq2_dot_i8(const int8_t *activations, const void *block_data,
                           size_t n, float *out);
+fox_status fox_tq1_dot_i8_scalar(const int8_t *activations, const void *block_data,
+                                 size_t n, float *out);
 fox_status fox_tq2_dot_i8_scalar(const int8_t *activations, const void *block_data,
                                  size_t n, float *out);
 
