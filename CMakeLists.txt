@@ -22,6 +22,7 @@ set(FOX_SOURCES
     src/sysprobe.c
     src/pressure.c
     src/governor.c
+    src/gguf.c
 )
 
 add_library(foxcore STATIC ${FOX_SOURCES})
@@ -83,7 +84,7 @@ endif()
 
 if(FOX_BUILD_TESTS)
     enable_testing()
-    set(FOX_TESTS test_probe test_governor)
+    set(FOX_TESTS test_probe test_governor test_gguf test_gguf_arrays)
     foreach(t IN LISTS FOX_TESTS)
         add_executable(${t} tests/${t}.c)
         target_link_libraries(${t} PRIVATE foxcore)

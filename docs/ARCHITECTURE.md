@@ -6,6 +6,16 @@ and the ones where the obvious thing is wrong.
 
 ---
 
+## 9. GGUF parser boundary
+
+`gguf.c` owns only the GGUF header region: it reads the header, typed metadata,
+and tensor descriptors, then validates the aligned data blob extents. It does
+not allocate or map model weights. The planner can therefore inspect names,
+dimensions, quantization type, and exact byte ranges before choosing pin,
+stream, or mmap placement. TQ1_0 and TQ2_0 are recognized using the canonical
+GGML block sizes, while decoding their packed values remains the kernel layer's
+responsibility.
+
 ## 1. Layering
 
 ```

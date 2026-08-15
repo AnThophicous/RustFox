@@ -201,6 +201,54 @@ void fox_log_set_level(fox_log_level lv);
 fox_log_level fox_log_get_level(void);
 void fox_log_init_from_env(void);
 
+#define FOX_GGUF_MAX_DIMS 4
+
+typedef enum {
+    FOX_GGUF_UINT8 = 0, FOX_GGUF_INT8, FOX_GGUF_UINT16, FOX_GGUF_INT16,
+    FOX_GGUF_UINT32, FOX_GGUF_INT32, FOX_GGUF_FLOAT32, FOX_GGUF_BOOL,
+    FOX_GGUF_STRING, FOX_GGUF_ARRAY, FOX_GGUF_UINT64, FOX_GGUF_INT64,
+    FOX_GGUF_FLOAT64
+} fox_gguf_value_type;
+
+typedef enum {
+    FOX_GGML_F32 = 0, FOX_GGML_F16 = 1, FOX_GGML_Q4_0 = 2,
+    FOX_GGML_Q4_1 = 3, FOX_GGML_Q5_0 = 6, FOX_GGML_Q5_1 = 7,
+    FOX_GGML_Q8_0 = 8, FOX_GGML_Q2_K = 10, FOX_GGML_Q3_K = 11,
+    FOX_GGML_Q4_K = 12, FOX_GGML_Q5_K = 13, FOX_GGML_Q6_K = 14,
+    FOX_GGML_Q8_K = 15, FOX_GGML_IQ2_XXS = 16, FOX_GGML_IQ2_XS = 17,
+    FOX_GGML_IQ3_XXS = 18, FOX_GGML_IQ1_S = 19, FOX_GGML_IQ4_NL = 20,
+    FOX_GGML_IQ3_S = 21, FOX_GGML_IQ2_S = 22, FOX_GGML_IQ4_XS = 23,
+    FOX_GGML_I8 = 24, FOX_GGML_I16 = 25, FOX_GGML_I32 = 26,
+    FOX_GGML_I64 = 27, FOX_GGML_F64 = 28, FOX_GGML_IQ1_M = 29,
+    FOX_GGML_BF16 = 30, FOX_GGML_TQ1_0 = 34, FOX_GGML_TQ2_0 = 35
+} fox_ggml_type;
+
+typedef struct {
+    const char *name;
+    uint32_t n_dims;
+    uint64_t ne[FOX_GGUF_MAX_DIMS];
+    fox_ggml_type type;
+    uint64_t offset;
+    uint64_t size_bytes;
+} fox_gguf_tensor;
+
+typedef struct fox_gguf fox_gguf;
+
+fox_status fox_gguf_open(const char *path, fox_gguf **out);
+void fox_gguf_close(fox_gguf *g);
+uint32_t fox_gguf_version(const fox_gguf *g);
+size_t fox_gguf_metadata_count(const fox_gguf *g);
+size_t fox_gguf_tensor_count(const fox_gguf *g);
+size_t fox_gguf_find(const fox_gguf *g, const char *key);
+fox_gguf_value_type fox_gguf_metadata_type(const fox_gguf *g, size_t index);
+fox_status fox_gguf_get_u32(const fox_gguf *g, size_t index, uint32_t *out);
+fox_status fox_gguf_get_string(const fox_gguf *g, size_t index, const char **out);
+fox_status fox_gguf_tensor_at(const fox_gguf *g, size_t index, fox_gguf_tensor *out);
+size_t fox_gguf_tensor_find(const fox_gguf *g, const char *name);
+const char *fox_ggml_type_name(fox_ggml_type type);
+uint32_t fox_ggml_type_block_size(fox_ggml_type type);
+uint32_t fox_ggml_type_block_bytes(fox_ggml_type type);
+
 #ifdef __cplusplus
 }
 #endif
