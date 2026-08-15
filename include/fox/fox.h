@@ -393,6 +393,8 @@ fox_status fox_weights_prefetch(fox_weights *w, size_t tensor_index);
 
 size_t     fox_weights_live_leases(const fox_weights *w);
 uint64_t   fox_weights_resident_bytes(const fox_weights *w);
+uint64_t   fox_weights_reads(const fox_weights *w);
+uint64_t   fox_weights_evictions(const fox_weights *w);
 
 #ifdef __cplusplus
 }
