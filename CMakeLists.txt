@@ -29,6 +29,7 @@ set(FOX_SOURCES
     src/threadpool.c
     src/gemv.c
     src/weights.c
+    src/kernels.c
 )
 
 set(THREADS_PREFER_PTHREAD_FLAG ON)
@@ -96,7 +97,7 @@ endif()
 if(FOX_BUILD_TESTS)
     enable_testing()
     set(FOX_TESTS test_probe test_governor test_gguf test_gguf_arrays test_planner
-                  test_ternary test_gemv test_weights test_tokenizer)
+                  test_ternary test_gemv test_weights test_tokenizer test_kernels)
     foreach(t IN LISTS FOX_TESTS)
         add_executable(${t} tests/${t}.c)
         target_link_libraries(${t} PRIVATE foxcore)

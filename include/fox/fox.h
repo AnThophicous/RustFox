@@ -350,6 +350,19 @@ fox_status fox_gemv_tq2_i8(fox_threadpool *tp, const int8_t *q, float act_scale,
                            const void *weights, size_t n_rows, size_t n_cols,
                            float *out);
 
+float fox_f16_to_f32(uint16_t h);
+uint16_t fox_f32_to_f16(float f);
+
+int    fox_gemv_supports(fox_ggml_type type);
+size_t fox_row_bytes(fox_ggml_type type, size_t n_cols);
+
+fox_status fox_gemv(fox_threadpool *tp, fox_ggml_type type, const float *x,
+                    const void *weights, size_t n_rows, size_t n_cols,
+                    float *out);
+
+fox_status fox_dequant_row(fox_ggml_type type, const void *row, size_t n,
+                           float *out);
+
 #define FOX_WEIGHTS_MAX_LIVE_LEASES 8
 
 typedef enum {
