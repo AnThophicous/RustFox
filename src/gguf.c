@@ -537,7 +537,6 @@ const char *fox_ggml_type_name(fox_ggml_type type)
     case FOX_GGML_IQ2_S:   return "IQ2_S";
     case FOX_GGML_IQ4_XS:  return "IQ4_XS";
     case FOX_GGML_IQ1_M:   return "IQ1_M";
-    case FOX_GGML_Q8_K:  return "Q8_K";
     case FOX_GGML_TQ1_0: return "TQ1_0";
     case FOX_GGML_TQ2_0: return "TQ2_0";
     default:             return "unknown";
