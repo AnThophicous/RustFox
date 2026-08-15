@@ -39,12 +39,6 @@ static int read_bytes(reader *r, void *p, size_t n)
     return 1;
 }
 
-static int skip(reader *r, uint64_t n)
-{
-    if (n > r->size - r->pos) return 0;
-    r->pos += n;
-    return 1;
-}
 
 static int u32(reader *r, uint32_t *v)
 {
