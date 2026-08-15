@@ -608,8 +608,15 @@ static void linux_find_mount(const char *path, char *dev, size_t dev_cap,
     char best_fs[64] = {0};
     size_t best_len = 0;
     char real[FOX_PATH_MAX];
+    char *resolved;
 
-    if (!realpath(path, real)) fox_strlcpy(real, path, sizeof(real));
+    resolved = realpath(path, NULL);
+    if (resolved) {
+        fox_strlcpy(real, resolved, sizeof(real));
+        free(resolved);
+    } else {
+        fox_strlcpy(real, path, sizeof(real));
+    }
 
     fp = fopen("/proc/mounts", "r");
     if (!fp) return;
