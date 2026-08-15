@@ -207,6 +207,99 @@ static float dot_q5_1(const uint8_t *w, const float *x, size_t n)
     return sum;
 }
 
+static void dequant_block_q6k(const uint8_t *blk, float *out)
+{
+    const uint8_t *ql = blk;
+    const uint8_t *qh = blk + 128;
+    const int8_t  *sc = (const int8_t *)(blk + 192);
+    float d = fox_f16_to_f32(load_half(blk + 208));
+    float *y = out;
+    int n, l;
+
+    for (n = 0; n < 256; n += 128) {
+        for (l = 0; l < 32; l++) {
+            int is = l / 16;
+            int q1 = (int)((ql[l]      & 0x0F) | (((qh[l] >> 0) & 3) << 4)) - 32;
+            int q2 = (int)((ql[l + 32] & 0x0F) | (((qh[l] >> 2) & 3) << 4)) - 32;
+            int q3 = (int)((ql[l]      >> 4)   | (((qh[l] >> 4) & 3) << 4)) - 32;
+            int q4 = (int)((ql[l + 32] >> 4)   | (((qh[l] >> 6) & 3) << 4)) - 32;
+
+            y[l]      = d * (float)sc[is + 0] * (float)q1;
+            y[l + 32] = d * (float)sc[is + 2] * (float)q2;
+            y[l + 64] = d * (float)sc[is + 4] * (float)q3;
+            y[l + 96] = d * (float)sc[is + 6] * (float)q4;
+        }
+        y  += 128;
+        ql += 64;
+        qh += 32;
+        sc += 8;
+    }
+}
+
+static void scale_min_k4(int j, const uint8_t *q, uint8_t *d, uint8_t *m)
+{
+    if (j < 4) {
+        *d = (uint8_t)(q[j]     & 63);
+        *m = (uint8_t)(q[j + 4] & 63);
+    } else {
+        *d = (uint8_t)((q[j + 4] & 0x0F) | ((q[j - 4] >> 6) << 4));
+        *m = (uint8_t)((q[j + 4] >> 4)   | ((q[j]     >> 6) << 4));
+    }
+}
+
+static void dequant_block_q4k(const uint8_t *blk, float *out)
+{
+    float d    = fox_f16_to_f32(load_half(blk));
+    float dmin = fox_f16_to_f32(load_half(blk + 2));
+    const uint8_t *scales = blk + 4;
+    const uint8_t *q = blk + 16;
+    float *y = out;
+    int j, l, is = 0;
+
+    for (j = 0; j < 256; j += 64) {
+        uint8_t sc, m;
+        float d1, m1, d2, m2;
+
+        scale_min_k4(is + 0, scales, &sc, &m);
+        d1 = d * (float)sc;
+        m1 = dmin * (float)m;
+        scale_min_k4(is + 1, scales, &sc, &m);
+        d2 = d * (float)sc;
+        m2 = dmin * (float)m;
+
+        for (l = 0; l < 32; l++) *y++ = d1 * (float)(q[l] & 0x0F) - m1;
+        for (l = 0; l < 32; l++) *y++ = d2 * (float)(q[l] >> 4)   - m2;
+
+        q  += 32;
+        is += 2;
+    }
+}
+
+static float dot_super(const uint8_t *w, const float *x, size_t n,
+                       size_t block_bytes,
+                       void (*expand)(const uint8_t *, float *))
+{
+    float block[256];
+    float sum = 0.0f;
+    size_t b, i, blocks = n / 256;
+
+    for (b = 0; b < blocks; b++) {
+        expand(w + b * block_bytes, block);
+        for (i = 0; i < 256; i++) sum += block[i] * x[b * 256 + i];
+    }
+    return sum;
+}
+
+static float dot_q6_k(const uint8_t *w, const float *x, size_t n)
+{
+    return dot_super(w, x, n, 210, dequant_block_q6k);
+}
+
+static float dot_q4_k(const uint8_t *w, const float *x, size_t n)
+{
+    return dot_super(w, x, n, 144, dequant_block_q4k);
+}
+
 typedef float (*dot_fn)(const uint8_t *w, const float *x, size_t n);
 
 static dot_fn dot_for(fox_ggml_type type)
@@ -219,6 +312,8 @@ static dot_fn dot_for(fox_ggml_type type)
     case FOX_GGML_Q4_1: return dot_q4_1;
     case FOX_GGML_Q5_0: return dot_q5_0;
     case FOX_GGML_Q5_1: return dot_q5_1;
+    case FOX_GGML_Q6_K: return dot_q6_k;
+    case FOX_GGML_Q4_K: return dot_q4_k;
     default: return NULL;
     }
 }
@@ -338,6 +433,18 @@ fox_status fox_dequant_row(fox_ggml_type type, const void *row, size_t n,
                 out[b * 32 + i + 16] = (float)((int)(qs[i] >> 4)   - 8) * d;
             }
         }
+        return FOX_OK;
+
+    case FOX_GGML_Q6_K:
+        blocks = n / 256;
+        for (b = 0; b < blocks; b++)
+            dequant_block_q6k(w + b * 210, out + b * 256);
+        return FOX_OK;
+
+    case FOX_GGML_Q4_K:
+        blocks = n / 256;
+        for (b = 0; b < blocks; b++)
+            dequant_block_q4k(w + b * 144, out + b * 256);
         return FOX_OK;
 
     default:
