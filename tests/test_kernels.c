@@ -125,6 +125,29 @@ static void ref_q4_k(const uint8_t *blk, float *out)
     }
 }
 
+static void ref_q5_k(const uint8_t *blk, float *out)
+{
+    float d    = half_at(blk);
+    float dmin = half_at(blk + 2);
+    const uint8_t *scales = blk + 4;
+    const uint8_t *qh = blk + 16;
+    const uint8_t *qs = blk + 48;
+    int i;
+
+    for (i = 0; i < 256; i++) {
+        int group = i / 32;
+        int l = i % 32;
+        const uint8_t qbyte = qs[(group & 3) * 32 + l];
+        int nib = group < 4 ? qbyte & 0x0F : qbyte >> 4;
+        int high = (qh[l] >> group) & 1;
+        uint8_t sc, m;
+
+        ref_scale_min(group, scales, &sc, &m);
+        out[i] = d * (float)sc * (float)(nib | (high << 4)) -
+                 dmin * (float)m;
+    }
+}
+
 static int close_enough(float got, float want)
 {
     float limit = 0.12f * (1.0f + fabsf(want));
@@ -162,7 +185,7 @@ static int probe_one_hot(fox_ggml_type type, const uint8_t *blk,
 
 int main(void)
 {
-    uint8_t q4[18], q8[34], q5[22], q6k[210], q4k[144];
+    uint8_t q4[18], q8[34], q5[22], q6k[210], q4k[144], q5k[176];
     float ref[256], deq[256];
     float x[N], w32[N];
     float qk_x[256];
@@ -188,12 +211,14 @@ int main(void)
     CHECK(fox_row_bytes(FOX_GGML_F16, 64) == 128, "F16 rows are 2 bytes each");
     CHECK(fox_row_bytes(FOX_GGML_Q4_0, 64) == 36, "Q4_0 is 18 bytes per 32");
     CHECK(fox_row_bytes(FOX_GGML_Q6_K, 256) == 210, "Q6_K is 210 bytes per 256");
+    CHECK(fox_row_bytes(FOX_GGML_Q5_K, 256) == 176, "Q5_K is 176 bytes per 256");
     CHECK(fox_row_bytes(FOX_GGML_Q4_K, 512) == 288, "Q4_K is 144 bytes per 256");
     CHECK(fox_row_bytes(FOX_GGML_Q4_0, 33) == 0,
           "a column count that is not a whole block reports zero");
     CHECK(fox_gemv_supports(FOX_GGML_TQ2_0) && fox_gemv_supports(FOX_GGML_Q8_0) &&
-          fox_gemv_supports(FOX_GGML_Q6_K) && fox_gemv_supports(FOX_GGML_Q4_K),
-          "ternary, legacy and the two K-quants that matter are supported");
+          fox_gemv_supports(FOX_GGML_Q5_K) && fox_gemv_supports(FOX_GGML_Q6_K) &&
+          fox_gemv_supports(FOX_GGML_Q4_K),
+          "ternary, legacy and the K-quants that matter are supported");
     CHECK(!fox_gemv_supports(FOX_GGML_Q2_K) && !fox_gemv_supports(FOX_GGML_IQ4_XS),
           "an unimplemented type says no rather than pretending");
 
@@ -231,6 +256,14 @@ int main(void)
           "Q4_K unpacks its 6-bit scales and mins from the 12 packed bytes and "
           "applies them to the right 32-element run; probed at all 256 positions");
 
+    for (i = 0; i < sizeof(q5k); i++) q5k[i] = (uint8_t)(rng_next(&seed) & 0xFF);
+    put_half(q5k, 0x3C00);
+    put_half(q5k + 2, 0x3800);
+    ref_q5_k(q5k, ref);
+    CHECK(probe_one_hot_tol(FOX_GGML_Q5_K, q5k, ref, 256, 1e-3f),
+          "Q5_K combines its nibble plane and per-position high-bit plane, "
+          "with the same 6-bit scale/min packing as Q4_K");
+
     CHECK(fox_dequant_row(FOX_GGML_Q6_K, q6k, 256, deq) == FOX_OK, "Q6_K dequant runs");
     ref_q6_k(q6k, ref);
     ok = 1;
@@ -242,6 +275,12 @@ int main(void)
     ok = 1;
     for (k = 0; k < 256; k++) if (deq[k] != ref[k]) ok = 0;
     CHECK(ok, "Q4_K dequant matches the reference element for element");
+
+    CHECK(fox_dequant_row(FOX_GGML_Q5_K, q5k, 256, deq) == FOX_OK, "Q5_K dequant runs");
+    ref_q5_k(q5k, ref);
+    ok = 1;
+    for (k = 0; k < 256; k++) if (deq[k] != ref[k]) ok = 0;
+    CHECK(ok, "Q5_K dequant matches the reference element for element");
 
     for (i = 0; i < 256; i++)
         qk_x[i] = (float)((int)(rng_next(&seed) & 0xFF) - 128) * 0.01f;
@@ -260,6 +299,14 @@ int main(void)
         CHECK(fox_gemv(NULL, FOX_GGML_Q4_K, qk_x, q4k, 1, 256, &got) == FOX_OK &&
               close_enough(got, want),
               "Q4_K integer SIMD GEMV stays within the quantized activation error bound");
+    }
+    ref_q5_k(q5k, ref);
+    {
+        float want = 0.0f, got = 0.0f;
+        for (i = 0; i < 256; i++) want += ref[i] * qk_x[i];
+        CHECK(fox_gemv(NULL, FOX_GGML_Q5_K, qk_x, q5k, 1, 256, &got) == FOX_OK &&
+              close_enough(got, want),
+              "Q5_K integer SIMD GEMV stays within the quantized activation error bound");
     }
 
     for (i = 0; i < N; i++) {

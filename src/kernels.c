@@ -282,6 +282,30 @@ static void dequant_block_q4k(const uint8_t *blk, float *out)
     }
 }
 
+static void dequant_block_q5k(const uint8_t *blk, float *out)
+{
+    float d    = fox_f16_to_f32(load_half(blk));
+    float dmin = fox_f16_to_f32(load_half(blk + 2));
+    const uint8_t *scales = blk + 4;
+    const uint8_t *qh = blk + 16;
+    const uint8_t *q = blk + 48;
+    int group, l;
+
+    for (group = 0; group < 8; group++) {
+        uint8_t sc, m;
+        const uint8_t *qg = q + (group & 3) * 32;
+
+        scale_min_k4(group, scales, &sc, &m);
+        for (l = 0; l < 32; l++) {
+            int nib = group < 4 ? qg[l] & 0x0F : qg[l] >> 4;
+            int high = (qh[l] >> group) & 1;
+            int value = nib | (high << 4);
+            out[group * 32 + l] = d * (float)sc * (float)value -
+                                   dmin * (float)m;
+        }
+    }
+}
+
 static float dot_q4_k(const uint8_t *w, const float *x, size_t n)
 {
     float sum = 0.0f;
@@ -323,6 +347,42 @@ static float dot_q4_k(const uint8_t *w, const float *x, size_t n)
 
             sum += d1 * acc_lo - m1 * sum_lo;
             sum += d2 * acc_hi - m2 * sum_hi;
+        }
+    }
+    return sum;
+}
+
+static float dot_q5_k(const uint8_t *w, const float *x, size_t n)
+{
+    float sum = 0.0f;
+    size_t b, blocks = n / 256;
+
+    for (b = 0; b < blocks; b++) {
+        const uint8_t *blk = w + b * 176;
+        float d    = fox_f16_to_f32(load_half(blk));
+        float dmin = fox_f16_to_f32(load_half(blk + 2));
+        const uint8_t *scales = blk + 4;
+        const uint8_t *qh = blk + 16;
+        const uint8_t *q = blk + 48;
+        const float *xb = x + b * 256;
+        int group;
+
+        for (group = 0; group < 8; group++) {
+            const uint8_t *qg = q + (group & 3) * 32;
+            const float *xg = xb + group * 32;
+            float acc = 0.0f;
+            float xsum = 0.0f;
+            uint8_t sc, m;
+            int l;
+
+            for (l = 0; l < 32; l++) {
+                int nib = group < 4 ? qg[l] & 0x0F : qg[l] >> 4;
+                int high = (qh[l] >> group) & 1;
+                acc += (float)(nib | (high << 4)) * xg[l];
+                xsum += xg[l];
+            }
+            scale_min_k4(group, scales, &sc, &m);
+            sum += d * (float)sc * acc - dmin * (float)m * xsum;
         }
     }
     return sum;
@@ -439,6 +499,35 @@ static int32_t kernel_dot_u4_i8(const uint8_t *a, const int8_t *b, int high_nibb
     return _mm_cvtsi128_si32(acc);
 }
 
+static int32_t kernel_dot_u1_i8(const uint8_t *a, const int8_t *b, int bit)
+{
+    __m128i zero = _mm_setzero_si128();
+    __m128i one = _mm_set1_epi8(1);
+    __m128i shift = _mm_cvtsi32_si128(bit);
+    __m128i ones = _mm_set1_epi16(1);
+    __m128i acc = _mm_setzero_si128();
+    int half;
+
+    for (half = 0; half < 2; half++) {
+        __m128i bits = _mm_loadu_si128((const __m128i *)(a + half * 16));
+        __m128i xb = _mm_loadu_si128((const __m128i *)(b + half * 16));
+        __m128i q = _mm_and_si128(_mm_srl_epi16(bits, shift), one);
+        __m128i qlo = _mm_unpacklo_epi8(q, zero);
+        __m128i qhi = _mm_unpackhi_epi8(q, zero);
+        __m128i xlo = kernel_sign_extend_low_i8(xb);
+        __m128i xhi = kernel_sign_extend_high_i8(xb);
+
+        acc = _mm_add_epi32(acc,
+                            _mm_madd_epi16(_mm_mullo_epi16(qlo, xlo), ones));
+        acc = _mm_add_epi32(acc,
+                            _mm_madd_epi16(_mm_mullo_epi16(qhi, xhi), ones));
+    }
+
+    acc = _mm_add_epi32(acc, _mm_srli_si128(acc, 8));
+    acc = _mm_add_epi32(acc, _mm_srli_si128(acc, 4));
+    return _mm_cvtsi128_si32(acc);
+}
+
 static int32_t kernel_q6_group_dot(const int8_t *x, const uint8_t *ql,
                                    const uint8_t *qh, const int8_t *sc,
                                    int sub)
@@ -512,6 +601,38 @@ static float dot_q4_k_i8(const uint8_t *w, const int8_t *x,
     return sum;
 }
 
+static float dot_q5_k_i8(const uint8_t *w, const int8_t *x,
+                         size_t n, float act_scale)
+{
+    float sum = 0.0f;
+    size_t b, blocks = n / 256;
+
+    for (b = 0; b < blocks; b++) {
+        const uint8_t *blk = w + b * 176;
+        float d = fox_f16_to_f32(load_half(blk));
+        float dmin = fox_f16_to_f32(load_half(blk + 2));
+        const uint8_t *scales = blk + 4;
+        const uint8_t *qh = blk + 16;
+        const uint8_t *q = blk + 48;
+        const int8_t *xb = x + b * 256;
+        int group;
+
+        for (group = 0; group < 8; group++) {
+            const int8_t *xg = xb + group * 32;
+            const uint8_t *qg = q + (group & 3) * 32;
+            uint8_t sc, m;
+
+            scale_min_k4(group, scales, &sc, &m);
+            sum += act_scale *
+                   (d * (float)sc * (float)(kernel_dot_u4_i8(
+                       qg, xg, group >= 4) +
+                       16 * kernel_dot_u1_i8(qh, xg, group)) -
+                    dmin * (float)m * (float)kernel_sum_i8(xg));
+        }
+    }
+    return sum;
+}
+
 static float dot_q6_k_i8(const uint8_t *w, const int8_t *x,
                          size_t n, float act_scale)
 {
@@ -553,6 +674,7 @@ static dot_fn dot_for(fox_ggml_type type)
     case FOX_GGML_Q4_1: return dot_q4_1;
     case FOX_GGML_Q5_0: return dot_q5_0;
     case FOX_GGML_Q5_1: return dot_q5_1;
+    case FOX_GGML_Q5_K: return dot_q5_k;
     case FOX_GGML_Q6_K: return dot_q6_k;
     case FOX_GGML_Q4_K: return dot_q4_k;
     default: return NULL;
@@ -635,7 +757,8 @@ static fox_status gemv_qk_i8(fox_threadpool *tp, fox_ggml_type type,
                         "gemv: %llu columns is not a whole %s block",
                         (unsigned long long)n_cols, fox_ggml_type_name(type));
 
-    job.dot = type == FOX_GGML_Q4_K ? dot_q4_k_i8 : dot_q6_k_i8;
+    job.dot = type == FOX_GGML_Q4_K ? dot_q4_k_i8 :
+              type == FOX_GGML_Q5_K ? dot_q5_k_i8 : dot_q6_k_i8;
     job.weights = (const uint8_t *)weights;
     job.x = x;
     job.act_scale = act_scale;
@@ -660,7 +783,8 @@ fox_status fox_gemv(fox_threadpool *tp, fox_ggml_type type, const float *x,
     if (n_rows == 0 || n_cols == 0) return FOX_ERR_ARG;
 
 #if defined(FOX_KERNEL_SSE2)
-    if (type == FOX_GGML_Q4_K || type == FOX_GGML_Q6_K) {
+    if (type == FOX_GGML_Q4_K || type == FOX_GGML_Q5_K ||
+        type == FOX_GGML_Q6_K) {
         int8_t *qx;
         float act_scale = 0.0f;
         fox_status st;
@@ -690,7 +814,8 @@ fox_status fox_gemv(fox_threadpool *tp, fox_ggml_type type, const float *x,
     if (!job.dot)
         return fox_fail(FOX_ERR_UNSUPPORTED,
                         "gemv: no kernel for %s yet; this build handles F32, "
-                        "F16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, TQ1_0 and TQ2_0",
+                        "F16, Q4_0, Q4_1, Q5_0, Q5_1, Q4_K, Q5_K, Q6_K, "
+                        "Q8_0, TQ1_0 and TQ2_0",
                         fox_ggml_type_name(type));
 
     row_bytes = fox_row_bytes(type, n_cols);
@@ -756,6 +881,12 @@ fox_status fox_dequant_row(fox_ggml_type type, const void *row, size_t n,
         blocks = n / 256;
         for (b = 0; b < blocks; b++)
             dequant_block_q6k(w + b * 210, out + b * 256);
+        return FOX_OK;
+
+    case FOX_GGML_Q5_K:
+        blocks = n / 256;
+        for (b = 0; b < blocks; b++)
+            dequant_block_q5k(w + b * 176, out + b * 256);
         return FOX_OK;
 
     case FOX_GGML_Q4_K:

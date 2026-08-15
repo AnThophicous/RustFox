@@ -241,7 +241,7 @@ heuristic.
 | ✅ | GGUF parser — metadata, arrays, tensor table, all block layouts | done |
 | ✅ | Placement planner with tok/s prediction | done |
 | ✅ | Ternary kernels TQ1_0 / TQ2_0, SSSE3 path for TQ2_0 | done |
-| ✅ | F32, F16, Q4_0/1, Q5_0/1, Q8_0, Q4_K, Q6_K kernels | done |
+| ✅ | F32, F16, Q4_0/1, Q5_0/1, Q8_0, Q4_K/Q5_K/Q6_K kernels | done |
 | ✅ | Threadpool and multi-threaded GEMV | done |
 | ✅ | Weights lease API — resident and streaming behind one contract | done |
 | ✅ | Streaming backend — LRU slots, hard budget, verified vs resident | done |
