@@ -91,7 +91,7 @@ static int cmp_double(const void *a, const void *b)
 fox_status fox_bench_storage(const char *dir, uint64_t probe_bytes,
                              fox_storage_info *io)
 {
-    char path[FOX_PATH_MAX];
+    char path[FOX_PATH_MAX + 32];
     char scratch[FOX_PATH_MAX];
     uint64_t cap = 0, avail = 0;
     fox_status st;

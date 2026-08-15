@@ -102,8 +102,12 @@ fox_file *fox_file_open_read(const char *path, unsigned flags, int *direct_grant
 #endif
 
     f = (fox_file *)calloc(1, sizeof(*f));
-    if (!f) { close(fd); fox_fail(FOX_ERR_NOMEM, "fox_file alloc");
-              if (direct_granted) *direct_granted = 0; return NULL; }
+    if (!f) {
+        close(fd);
+        fox_fail(FOX_ERR_NOMEM, "fox_file alloc");
+        if (direct_granted) *direct_granted = 0;
+        return NULL;
+    }
     f->fd = fd;
     f->direct = granted;
     if (direct_granted) *direct_granted = granted;
@@ -414,7 +418,7 @@ static int linux_in_container(void)
 
 static void linux_cgroup_mem(fox_mem_info *m)
 {
-    char path[FOX_PATH_MAX];
+    char path[FOX_PATH_MAX + 64];
     char cg[1024];
     uint64_t v;
 
