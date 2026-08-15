@@ -569,7 +569,7 @@ static int32_t kernel_q6_group_dot(const int8_t *x, const uint8_t *ql,
 }
 
 static float dot_q4_k_i8(const uint8_t *w, const int8_t *x,
-                         size_t n, float act_scale)
+                         size_t n, const float *ascale)
 {
     float sum = 0.0f;
     size_t b, blocks = n / 256;
@@ -589,11 +589,11 @@ static float dot_q4_k_i8(const uint8_t *w, const int8_t *x,
             uint8_t sc, m;
 
             scale_min_k4(p * 2 + 0, scales, &sc, &m);
-            sum += act_scale * (d * (float)sc *
+            sum += ascale[b] * (d * (float)sc *
                                 (float)kernel_dot_u4_i8(q, xlo, 0) -
                                 dmin * (float)m * (float)kernel_sum_i8(xlo));
             scale_min_k4(p * 2 + 1, scales, &sc, &m);
-            sum += act_scale * (d * (float)sc *
+            sum += ascale[b] * (d * (float)sc *
                                 (float)kernel_dot_u4_i8(q, xhi, 1) -
                                 dmin * (float)m * (float)kernel_sum_i8(xhi));
         }
@@ -602,7 +602,7 @@ static float dot_q4_k_i8(const uint8_t *w, const int8_t *x,
 }
 
 static float dot_q5_k_i8(const uint8_t *w, const int8_t *x,
-                         size_t n, float act_scale)
+                         size_t n, const float *ascale)
 {
     float sum = 0.0f;
     size_t b, blocks = n / 256;
@@ -623,7 +623,7 @@ static float dot_q5_k_i8(const uint8_t *w, const int8_t *x,
             uint8_t sc, m;
 
             scale_min_k4(group, scales, &sc, &m);
-            sum += act_scale *
+            sum += ascale[b] *
                    (d * (float)sc * (float)(kernel_dot_u4_i8(
                        qg, xg, group >= 4) +
                        16 * kernel_dot_u1_i8(qh, xg, group)) -
@@ -634,7 +634,7 @@ static float dot_q5_k_i8(const uint8_t *w, const int8_t *x,
 }
 
 static float dot_q6_k_i8(const uint8_t *w, const int8_t *x,
-                         size_t n, float act_scale)
+                         size_t n, const float *ascale)
 {
     float sum = 0.0f;
     size_t b, blocks = n / 256;
@@ -652,7 +652,7 @@ static float dot_q6_k_i8(const uint8_t *w, const int8_t *x,
             int sub;
 
             for (sub = 0; sub < 2; sub++)
-                sum += act_scale * d *
+                sum += ascale[b] * d *
                        (float)kernel_q6_group_dot(xb + (size_t)half * 128,
                                                   ql, qh, sc, sub);
         }
@@ -719,14 +719,48 @@ static void kernel_rows(void *vjob, int worker, size_t begin, size_t end)
 
 #if defined(FOX_KERNEL_SSE2)
 
+static void quantize_activations_k(const float *x, size_t n,
+                                   int8_t *q, float *scales)
+{
+    size_t b, blocks = n / 256;
+
+    for (b = 0; b < blocks; b++) {
+        const float *xb = x + b * 256;
+        int8_t *qb = q + b * 256;
+        float amax = 0.0f;
+        float inv;
+        size_t i;
+
+        for (i = 0; i < 256; i++) {
+            float a = xb[i] < 0.0f ? -xb[i] : xb[i];
+            if (a > amax) amax = a;
+        }
+        if (!(amax > 0.0f)) {
+            memset(qb, 0, 256);
+            scales[b] = 0.0f;
+            continue;
+        }
+
+        inv = 127.0f / amax;
+        for (i = 0; i < 256; i++) {
+            float v = xb[i] * inv;
+            int r = (int)(v < 0.0f ? v - 0.5f : v + 0.5f);
+            if (r >  127) r =  127;
+            if (r < -127) r = -127;
+            qb[i] = (int8_t)r;
+        }
+        scales[b] = amax / 127.0f;
+    }
+}
+
 typedef float (*dot_i8_fn)(const uint8_t *w, const int8_t *x,
-                           size_t n, float act_scale);
+                           size_t n, const float *ascale);
 
 typedef struct {
     dot_i8_fn      dot;
     const uint8_t *weights;
     const int8_t   *x;
-    float          act_scale;
+    const float   *ascale;
     float          *out;
     size_t         n_cols;
     size_t         row_bytes;
@@ -740,11 +774,11 @@ static void kernel_i8_rows(void *vjob, int worker, size_t begin, size_t end)
     (void)worker;
     for (r = begin; r < end; r++)
         job->out[r] = job->dot(job->weights + r * job->row_bytes,
-                               job->x, job->n_cols, job->act_scale);
+                               job->x, job->n_cols, job->ascale);
 }
 
 static fox_status gemv_qk_i8(fox_threadpool *tp, fox_ggml_type type,
-                             const int8_t *x, float act_scale,
+                             const int8_t *x, const float *ascale,
                              const void *weights, size_t n_rows,
                              size_t n_cols, float *out)
 {
@@ -761,7 +795,7 @@ static fox_status gemv_qk_i8(fox_threadpool *tp, fox_ggml_type type,
               type == FOX_GGML_Q5_K ? dot_q5_k_i8 : dot_q6_k_i8;
     job.weights = (const uint8_t *)weights;
     job.x = x;
-    job.act_scale = act_scale;
+    job.ascale = ascale;
     job.out = out;
     job.n_cols = n_cols;
     job.row_bytes = fox_row_bytes(type, n_cols);
@@ -786,7 +820,7 @@ fox_status fox_gemv(fox_threadpool *tp, fox_ggml_type type, const float *x,
     if (type == FOX_GGML_Q4_K || type == FOX_GGML_Q5_K ||
         type == FOX_GGML_Q6_K) {
         int8_t *qx;
-        float act_scale = 0.0f;
+        float *ascale;
         fox_status st;
 
         if (fox_row_bytes(type, n_cols) == 0)
@@ -795,12 +829,16 @@ fox_status fox_gemv(fox_threadpool *tp, fox_ggml_type type, const float *x,
                             (unsigned long long)n_cols, fox_ggml_type_name(type));
 
         qx = (int8_t *)malloc(n_cols);
-        if (!qx) return fox_fail(FOX_ERR_NOMEM, "gemv: activation buffer");
-        st = fox_quantize_activations_i8(x, n_cols, qx, &act_scale);
-        if (st == FOX_OK)
-            st = gemv_qk_i8(tp, type, qx, act_scale, weights,
-                            n_rows, n_cols, out);
+        ascale = (float *)malloc((n_cols / 256) * sizeof(float));
+        if (!qx || !ascale) {
+            free(qx);
+            free(ascale);
+            return fox_fail(FOX_ERR_NOMEM, "gemv: activation buffer");
+        }
+        quantize_activations_k(x, n_cols, qx, ascale);
+        st = gemv_qk_i8(tp, type, qx, ascale, weights, n_rows, n_cols, out);
         free(qx);
+        free(ascale);
         return st;
     }
 #endif
