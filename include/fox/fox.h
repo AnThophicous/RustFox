@@ -244,6 +244,7 @@ fox_gguf_value_type fox_gguf_metadata_type(const fox_gguf *g, size_t index);
 size_t fox_gguf_metadata_array_count(const fox_gguf *g, size_t index);
 fox_gguf_value_type fox_gguf_metadata_array_type(const fox_gguf *g, size_t index);
 fox_status fox_gguf_get_u32(const fox_gguf *g, size_t index, uint32_t *out);
+fox_status fox_gguf_get_bool(const fox_gguf *g, size_t index, int *out);
 fox_status fox_gguf_get_string(const fox_gguf *g, size_t index, const char **out);
 fox_status fox_gguf_get_array_string(const fox_gguf *g, size_t index,
                                      size_t element, const char **out);
@@ -255,6 +256,21 @@ fox_status fox_gguf_tensor_at(const fox_gguf *g, size_t index, fox_gguf_tensor *
 size_t fox_gguf_tensor_find(const fox_gguf *g, const char *name);
 fox_status fox_gguf_read_tensor(const fox_gguf *g, size_t index,
                                  void *dst, size_t capacity);
+
+#define FOX_TOKEN_INVALID UINT32_MAX
+
+typedef struct fox_tokenizer fox_tokenizer;
+
+fox_status fox_tokenizer_open(const fox_gguf *model, fox_tokenizer **out);
+void fox_tokenizer_close(fox_tokenizer *tokenizer);
+size_t fox_tokenizer_vocab_size(const fox_tokenizer *tokenizer);
+uint32_t fox_tokenizer_bos(const fox_tokenizer *tokenizer);
+uint32_t fox_tokenizer_eos(const fox_tokenizer *tokenizer);
+fox_status fox_tokenizer_encode(const fox_tokenizer *tokenizer, const char *text,
+                                uint32_t *tokens, size_t capacity, size_t *written);
+fox_status fox_tokenizer_decode(const fox_tokenizer *tokenizer,
+                                const uint32_t *tokens, size_t count,
+                                char *text, size_t capacity, size_t *written);
 const char *fox_ggml_type_name(fox_ggml_type type);
 uint32_t fox_ggml_type_block_size(fox_ggml_type type);
 uint32_t fox_ggml_type_block_bytes(fox_ggml_type type);
@@ -307,6 +323,63 @@ fox_status fox_tq1_dot_i8_scalar(const int8_t *activations, const void *block_da
                                  size_t n, float *out);
 fox_status fox_tq2_dot_i8_scalar(const int8_t *activations, const void *block_data,
                                  size_t n, float *out);
+
+typedef struct fox_threadpool fox_threadpool;
+
+fox_threadpool *fox_threadpool_create(int n_threads);
+void            fox_threadpool_destroy(fox_threadpool *tp);
+int             fox_threadpool_size(const fox_threadpool *tp);
+
+typedef void (*fox_parallel_fn)(void *ctx, int worker, size_t begin, size_t end);
+
+fox_status fox_parallel_for(fox_threadpool *tp, size_t n,
+                            fox_parallel_fn fn, void *ctx);
+
+fox_status fox_quantize_activations_i8(const float *x, size_t n,
+                                       int8_t *q, float *scale);
+
+fox_status fox_gemv_tq1_f32(fox_threadpool *tp, const float *x, const void *weights,
+                            size_t n_rows, size_t n_cols, float *out);
+fox_status fox_gemv_tq2_f32(fox_threadpool *tp, const float *x, const void *weights,
+                            size_t n_rows, size_t n_cols, float *out);
+
+fox_status fox_gemv_tq1_i8(fox_threadpool *tp, const int8_t *q, float act_scale,
+                           const void *weights, size_t n_rows, size_t n_cols,
+                           float *out);
+fox_status fox_gemv_tq2_i8(fox_threadpool *tp, const int8_t *q, float act_scale,
+                           const void *weights, size_t n_rows, size_t n_cols,
+                           float *out);
+
+#define FOX_WEIGHTS_MAX_LIVE_LEASES 8
+
+typedef enum {
+    FOX_WEIGHTS_RESIDENT = 0,
+    FOX_WEIGHTS_STREAM   = 1
+} fox_weights_mode;
+
+typedef struct fox_weights fox_weights;
+
+typedef struct {
+    const void *data;
+    uint64_t    bytes;
+    size_t      tensor_index;
+    void       *slot;
+} fox_weights_lease;
+
+fox_status fox_weights_open(const char *gguf_path, fox_weights_mode mode,
+                            uint64_t budget_bytes, fox_weights **out);
+void       fox_weights_close(fox_weights *w);
+
+const fox_gguf *fox_weights_model(const fox_weights *w);
+fox_weights_mode fox_weights_get_mode(const fox_weights *w);
+
+fox_status fox_weights_acquire(fox_weights *w, size_t tensor_index,
+                               fox_weights_lease *lease);
+void       fox_weights_release(fox_weights *w, fox_weights_lease *lease);
+fox_status fox_weights_prefetch(fox_weights *w, size_t tensor_index);
+
+size_t     fox_weights_live_leases(const fox_weights *w);
+uint64_t   fox_weights_resident_bytes(const fox_weights *w);
 
 #ifdef __cplusplus
 }

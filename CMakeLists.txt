@@ -25,7 +25,13 @@ set(FOX_SOURCES
     src/gguf.c
     src/planner.c
     src/ternary.c
+    src/threadpool.c
+    src/gemv.c
+    src/weights.c
 )
+
+set(THREADS_PREFER_PTHREAD_FLAG ON)
+find_package(Threads REQUIRED)
 
 add_library(foxcore STATIC ${FOX_SOURCES})
 
@@ -53,6 +59,8 @@ else()
         target_compile_options(foxcore PRIVATE -Werror)
     endif()
 endif()
+
+target_link_libraries(foxcore PUBLIC Threads::Threads)
 
 if(UNIX AND NOT APPLE)
     target_link_libraries(foxcore PUBLIC m)
@@ -86,7 +94,8 @@ endif()
 
 if(FOX_BUILD_TESTS)
     enable_testing()
-    set(FOX_TESTS test_probe test_governor test_gguf test_gguf_arrays test_planner test_ternary)
+    set(FOX_TESTS test_probe test_governor test_gguf test_gguf_arrays test_planner
+                  test_ternary test_gemv test_weights)
     foreach(t IN LISTS FOX_TESTS)
         add_executable(${t} tests/${t}.c)
         target_link_libraries(${t} PRIVATE foxcore)

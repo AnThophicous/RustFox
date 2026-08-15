@@ -66,6 +66,23 @@ fox_status fox_fs_space(const char *path, uint64_t *capacity, uint64_t *avail);
 
 int fox_cpu_count_online(void);
 
+typedef struct fox_thread fox_thread;
+typedef struct fox_mutex  fox_mutex;
+typedef struct fox_cond   fox_cond;
+
+fox_thread *fox_thread_start(void (*entry)(void *), void *arg);
+void        fox_thread_join(fox_thread *t);
+
+fox_mutex *fox_mutex_create(void);
+void       fox_mutex_destroy(fox_mutex *m);
+void       fox_mutex_lock(fox_mutex *m);
+void       fox_mutex_unlock(fox_mutex *m);
+
+fox_cond *fox_cond_create(void);
+void      fox_cond_destroy(fox_cond *c);
+void      fox_cond_wait(fox_cond *c, fox_mutex *m);
+void      fox_cond_broadcast(fox_cond *c);
+
 void fox_probe_cpu(fox_cpu_info *out);
 
 void fox_plat_cpu_topology(fox_cpu_info *out);

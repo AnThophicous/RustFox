@@ -6,6 +6,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -237,6 +238,78 @@ int fox_cpu_count_online(void)
         return n > 0 ? (int)n : 1;
     }
 }
+
+struct fox_thread { pthread_t handle; void (*entry)(void *); void *arg; };
+struct fox_mutex  { pthread_mutex_t m; };
+struct fox_cond   { pthread_cond_t c; };
+
+static void *thread_trampoline(void *p)
+{
+    fox_thread *t = (fox_thread *)p;
+    t->entry(t->arg);
+    return NULL;
+}
+
+fox_thread *fox_thread_start(void (*entry)(void *), void *arg)
+{
+    fox_thread *t;
+
+    if (!entry) return NULL;
+    t = (fox_thread *)calloc(1, sizeof(*t));
+    if (!t) { fox_fail(FOX_ERR_NOMEM, "thread alloc"); return NULL; }
+
+    t->entry = entry;
+    t->arg = arg;
+    if (pthread_create(&t->handle, NULL, thread_trampoline, t) != 0) {
+        free(t);
+        fox_fail(FOX_ERR_INTERNAL, "pthread_create: %s", strerror(errno));
+        return NULL;
+    }
+    return t;
+}
+
+void fox_thread_join(fox_thread *t)
+{
+    if (!t) return;
+    pthread_join(t->handle, NULL);
+    free(t);
+}
+
+fox_mutex *fox_mutex_create(void)
+{
+    fox_mutex *m = (fox_mutex *)calloc(1, sizeof(*m));
+    if (!m) return NULL;
+    if (pthread_mutex_init(&m->m, NULL) != 0) { free(m); return NULL; }
+    return m;
+}
+
+void fox_mutex_destroy(fox_mutex *m)
+{
+    if (!m) return;
+    pthread_mutex_destroy(&m->m);
+    free(m);
+}
+
+void fox_mutex_lock(fox_mutex *m)   { pthread_mutex_lock(&m->m); }
+void fox_mutex_unlock(fox_mutex *m) { pthread_mutex_unlock(&m->m); }
+
+fox_cond *fox_cond_create(void)
+{
+    fox_cond *c = (fox_cond *)calloc(1, sizeof(*c));
+    if (!c) return NULL;
+    if (pthread_cond_init(&c->c, NULL) != 0) { free(c); return NULL; }
+    return c;
+}
+
+void fox_cond_destroy(fox_cond *c)
+{
+    if (!c) return;
+    pthread_cond_destroy(&c->c);
+    free(c);
+}
+
+void fox_cond_wait(fox_cond *c, fox_mutex *m) { pthread_cond_wait(&c->c, &m->m); }
+void fox_cond_broadcast(fox_cond *c)          { pthread_cond_broadcast(&c->c); }
 
 #if defined(FOX_OS_LINUX)
 

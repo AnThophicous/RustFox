@@ -223,6 +223,80 @@ int fox_cpu_count_online(void)
     }
 }
 
+struct fox_thread { HANDLE handle; void (*entry)(void *); void *arg; };
+struct fox_mutex  { CRITICAL_SECTION cs; };
+struct fox_cond   { CONDITION_VARIABLE cv; };
+
+static DWORD WINAPI thread_trampoline(LPVOID p)
+{
+    fox_thread *t = (fox_thread *)p;
+    t->entry(t->arg);
+    return 0;
+}
+
+fox_thread *fox_thread_start(void (*entry)(void *), void *arg)
+{
+    fox_thread *t;
+
+    if (!entry) return NULL;
+    t = (fox_thread *)calloc(1, sizeof(*t));
+    if (!t) { fox_fail(FOX_ERR_NOMEM, "thread alloc"); return NULL; }
+
+    t->entry = entry;
+    t->arg = arg;
+    t->handle = CreateThread(NULL, 0, thread_trampoline, t, 0, NULL);
+    if (!t->handle) {
+        free(t);
+        fox_fail(FOX_ERR_INTERNAL, "CreateThread: error %lu",
+                 (unsigned long)GetLastError());
+        return NULL;
+    }
+    return t;
+}
+
+void fox_thread_join(fox_thread *t)
+{
+    if (!t) return;
+    WaitForSingleObject(t->handle, INFINITE);
+    CloseHandle(t->handle);
+    free(t);
+}
+
+fox_mutex *fox_mutex_create(void)
+{
+    fox_mutex *m = (fox_mutex *)calloc(1, sizeof(*m));
+    if (!m) return NULL;
+    InitializeCriticalSection(&m->cs);
+    return m;
+}
+
+void fox_mutex_destroy(fox_mutex *m)
+{
+    if (!m) return;
+    DeleteCriticalSection(&m->cs);
+    free(m);
+}
+
+void fox_mutex_lock(fox_mutex *m)   { EnterCriticalSection(&m->cs); }
+void fox_mutex_unlock(fox_mutex *m) { LeaveCriticalSection(&m->cs); }
+
+fox_cond *fox_cond_create(void)
+{
+    fox_cond *c = (fox_cond *)calloc(1, sizeof(*c));
+    if (!c) return NULL;
+    InitializeConditionVariable(&c->cv);
+    return c;
+}
+
+void fox_cond_destroy(fox_cond *c) { free(c); }
+
+void fox_cond_wait(fox_cond *c, fox_mutex *m)
+{
+    SleepConditionVariableCS(&c->cv, &m->cs, INFINITE);
+}
+
+void fox_cond_broadcast(fox_cond *c) { WakeAllConditionVariable(&c->cv); }
+
 void fox_plat_cpu_topology(fox_cpu_info *out)
 {
     DWORD len = 0;

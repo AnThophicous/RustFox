@@ -119,28 +119,47 @@ static int str_read(reader *r, char **out, fox_status *rc)
     return 1;
 }
 
-static int skip_array(reader *r)
+static void free_array(fox_gguf_meta *m)
+{
+    size_t i;
+    if (m->array_strings) {
+        for (i = 0; i < m->array_count; i++) free(m->array_strings[i]);
+        free(m->array_strings);
+    }
+    free(m->array_values);
+    m->array_strings = NULL;
+    m->array_values = NULL;
+}
+
+static int read_array(reader *r, fox_gguf_meta *m, fox_status *rc)
 {
     int32_t elem;
-    uint64_t count, k, n, total;
+    uint64_t count, k, value;
+    uint64_t size;
 
     if (!i32(r, &elem) || elem < 0 || elem > FOX_GGUF_FLOAT64) return 0;
-    if (!u64(r, &count) || count > GGUF_MAX_ITEMS) return 0;
+    if (!u64(r, &count) || count > GGUF_MAX_ITEMS || count > SIZE_MAX) return 0;
+    m->array_type = (fox_gguf_value_type)elem;
+    m->array_count = (size_t)count;
 
     if ((fox_gguf_value_type)elem == FOX_GGUF_STRING) {
+        m->array_strings = (char **)calloc(m->array_count, sizeof(*m->array_strings));
+        if (m->array_count && !m->array_strings) { *rc = FOX_ERR_NOMEM; return 0; }
         for (k = 0; k < count; k++) {
-            if (!u64(r, &n)) return 0;
-            if (n > GGUF_MAX_STRING) return 0;
-            if (!skip(r, n)) return 0;
+            if (!str_read(r, &m->array_strings[k], rc)) { free_array(m); return 0; }
         }
         return 1;
     }
 
     if ((fox_gguf_value_type)elem == FOX_GGUF_ARRAY) return 0;
 
-    if (!value_size((fox_gguf_value_type)elem, &n)) return 0;
-    if (!mul_ok(count, n, &total)) return 0;
-    if (!skip(r, total)) return 0;
+    if (!value_size((fox_gguf_value_type)elem, &size)) return 0;
+    m->array_values = (uint64_t *)calloc(m->array_count, sizeof(*m->array_values));
+    if (m->array_count && !m->array_values) { *rc = FOX_ERR_NOMEM; return 0; }
+    for (k = 0; k < count; k++) {
+        if (!scalar(r, (fox_gguf_value_type)elem, &value)) { free_array(m); return 0; }
+        m->array_values[k] = value;
+    }
     return 1;
 }
 
@@ -191,6 +210,7 @@ static void dispose(fox_gguf *g)
         for (i = 0; i < g->n_meta; i++) {
             free(g->meta[i].key);
             free(g->meta[i].string);
+            free_array(&g->meta[i]);
         }
         free(g->meta);
     }
@@ -198,6 +218,7 @@ static void dispose(fox_gguf *g)
         for (i = 0; i < g->n_tensors; i++) free((char *)g->tensors[i].name);
         free(g->tensors);
     }
+    free(g->path);
     free(g);
 }
 
@@ -230,8 +251,8 @@ static fox_status read_metadata(reader *r, fox_gguf *g, uint32_t *align)
             if (!str_read(r, &m->string, &rc))
                 return fox_fail(rc, "gguf: bad string value for key '%s'", m->key);
         } else if (m->type == FOX_GGUF_ARRAY) {
-            if (!skip_array(r))
-                return fox_fail(FOX_ERR_FORMAT,
+            if (!read_array(r, m, &rc))
+                return fox_fail(rc,
                                 "gguf: bad array for key '%s'", m->key);
         } else {
             if (!scalar(r, m->type, &m->u64))
@@ -353,6 +374,12 @@ fox_status fox_gguf_open(const char *path, fox_gguf **out)
         rc = fox_fail(FOX_ERR_NOMEM, "gguf: header allocation failed");
         goto fail;
     }
+    g->path = (char *)malloc(strlen(path) + 1);
+    if (!g->path) {
+        rc = fox_fail(FOX_ERR_NOMEM, "gguf: path allocation failed");
+        goto fail;
+    }
+    strcpy(g->path, path);
 
     if (!read_bytes(&r, magic, 4) || memcmp(magic, "GGUF", 4) != 0) {
         rc = fox_fail(FOX_ERR_FORMAT, "gguf: %s is not a GGUF file", path);
@@ -469,6 +496,19 @@ fox_gguf_value_type fox_gguf_metadata_type(const fox_gguf *g, size_t index)
     return g->meta[index].type;
 }
 
+size_t fox_gguf_metadata_array_count(const fox_gguf *g, size_t index)
+{
+    if (!g || index >= g->n_meta || g->meta[index].type != FOX_GGUF_ARRAY) return 0;
+    return g->meta[index].array_count;
+}
+
+fox_gguf_value_type fox_gguf_metadata_array_type(const fox_gguf *g, size_t index)
+{
+    if (!g || index >= g->n_meta || g->meta[index].type != FOX_GGUF_ARRAY)
+        return FOX_GGUF_ARRAY;
+    return g->meta[index].array_type;
+}
+
 fox_status fox_gguf_get_u32(const fox_gguf *g, size_t index, uint32_t *out)
 {
     if (!g || !out) return FOX_ERR_ARG;
@@ -478,12 +518,59 @@ fox_status fox_gguf_get_u32(const fox_gguf *g, size_t index, uint32_t *out)
     return FOX_OK;
 }
 
+fox_status fox_gguf_get_bool(const fox_gguf *g, size_t index, int *out)
+{
+    if (!g || !out) return FOX_ERR_ARG;
+    if (index >= g->n_meta) return FOX_ERR_NOTFOUND;
+    if (g->meta[index].type != FOX_GGUF_BOOL) return FOX_ERR_FORMAT;
+    *out = g->meta[index].u64 != 0;
+    return FOX_OK;
+}
+
 fox_status fox_gguf_get_string(const fox_gguf *g, size_t index, const char **out)
 {
     if (!g || !out) return FOX_ERR_ARG;
     if (index >= g->n_meta) return FOX_ERR_NOTFOUND;
     if (g->meta[index].type != FOX_GGUF_STRING) return FOX_ERR_FORMAT;
     *out = g->meta[index].string;
+    return FOX_OK;
+}
+
+fox_status fox_gguf_get_array_string(const fox_gguf *g, size_t index,
+                                     size_t element, const char **out)
+{
+    if (!g || !out) return FOX_ERR_ARG;
+    if (index >= g->n_meta) return FOX_ERR_NOTFOUND;
+    if (g->meta[index].type != FOX_GGUF_ARRAY ||
+        g->meta[index].array_type != FOX_GGUF_STRING) return FOX_ERR_FORMAT;
+    if (element >= g->meta[index].array_count) return FOX_ERR_NOTFOUND;
+    *out = g->meta[index].array_strings[element];
+    return FOX_OK;
+}
+
+fox_status fox_gguf_get_array_i32(const fox_gguf *g, size_t index,
+                                  size_t element, int32_t *out)
+{
+    if (!g || !out) return FOX_ERR_ARG;
+    if (index >= g->n_meta) return FOX_ERR_NOTFOUND;
+    if (g->meta[index].type != FOX_GGUF_ARRAY ||
+        g->meta[index].array_type != FOX_GGUF_INT32) return FOX_ERR_FORMAT;
+    if (element >= g->meta[index].array_count) return FOX_ERR_NOTFOUND;
+    *out = (int32_t)g->meta[index].array_values[element];
+    return FOX_OK;
+}
+
+fox_status fox_gguf_get_array_f32(const fox_gguf *g, size_t index,
+                                  size_t element, float *out)
+{
+    union { uint32_t u; float f; } value;
+    if (!g || !out) return FOX_ERR_ARG;
+    if (index >= g->n_meta) return FOX_ERR_NOTFOUND;
+    if (g->meta[index].type != FOX_GGUF_ARRAY ||
+        g->meta[index].array_type != FOX_GGUF_FLOAT32) return FOX_ERR_FORMAT;
+    if (element >= g->meta[index].array_count) return FOX_ERR_NOTFOUND;
+    value.u = (uint32_t)g->meta[index].array_values[element];
+    *out = value.f;
     return FOX_OK;
 }
 
@@ -504,6 +591,38 @@ size_t fox_gguf_tensor_find(const fox_gguf *g, const char *name)
         if (strcmp(g->tensors[i].name, name) == 0) return i;
     }
     return SIZE_MAX;
+}
+
+fox_status fox_gguf_read_tensor(const fox_gguf *g, size_t index,
+                                void *dst, size_t capacity)
+{
+    fox_file *f;
+    uint64_t file_offset;
+    uint64_t remaining;
+    uint8_t *out;
+
+    if (!g || !dst) return FOX_ERR_ARG;
+    if (index >= g->n_tensors) return FOX_ERR_NOTFOUND;
+    if (g->tensors[index].size_bytes > capacity) return FOX_ERR_ARG;
+    if (!add_ok(g->data_offset, g->tensors[index].offset, &file_offset))
+        return FOX_ERR_FORMAT;
+
+    f = fox_file_open_read(g->path, FOX_OPEN_RANDOM, NULL);
+    if (!f) return FOX_ERR_IO;
+    remaining = g->tensors[index].size_bytes;
+    out = (uint8_t *)dst;
+    while (remaining) {
+        size_t chunk = remaining > (1u << 20) ? (1u << 20) : (size_t)remaining;
+        if (fox_file_pread(f, out, chunk, file_offset) != (int64_t)chunk) {
+            fox_file_close(f);
+            return FOX_ERR_IO;
+        }
+        out += chunk;
+        file_offset += chunk;
+        remaining -= chunk;
+    }
+    fox_file_close(f);
+    return FOX_OK;
 }
 
 const char *fox_ggml_type_name(fox_ggml_type type)

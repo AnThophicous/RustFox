@@ -91,9 +91,24 @@ int main(void)
         CHECK(idx != SIZE_MAX, "the string array key is indexed");
         CHECK(fox_gguf_metadata_type(g, idx) == FOX_GGUF_ARRAY,
               "the string array reports as an array");
+        CHECK(fox_gguf_metadata_array_count(g, idx) == 4 &&
+              fox_gguf_metadata_array_type(g, idx) == FOX_GGUF_STRING,
+              "the vocabulary array retains its element type and count");
+        {
+            const char *token = NULL;
+            CHECK(fox_gguf_get_array_string(g, idx, 1, &token) == FOX_OK &&
+                  strcmp(token, "hello") == 0,
+                  "the vocabulary strings are retained for the tokenizer");
+        }
 
         idx = fox_gguf_find(g, "tokenizer.ggml.token_type");
         CHECK(idx != SIZE_MAX, "the numeric array key is indexed");
+        {
+            int32_t token_type = -1;
+            CHECK(fox_gguf_get_array_i32(g, idx, 2, &token_type) == FOX_OK &&
+                  token_type == 2,
+                  "numeric tokenizer metadata is retained");
+        }
 
         CHECK(fox_gguf_tensor_count(g) == 1, "the tensor after the arrays is seen");
 

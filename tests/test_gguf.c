@@ -15,6 +15,7 @@ int main(void)
     FILE *f = fopen(path, "wb");
     fox_gguf *g = NULL;
     fox_gguf_tensor t;
+    uint8_t tensor_data[54];
     size_t idx;
     const char *s;
     fox_status st;
@@ -37,6 +38,12 @@ int main(void)
     CHECK(fox_gguf_tensor_find(g,"output")==1,"tensor lookup works");
     CHECK(fox_gguf_tensor_at(g,0,&t)==FOX_OK&&t.type==FOX_GGML_TQ1_0&&t.size_bytes==54,"TQ1 tensor size is known");
     CHECK(fox_gguf_tensor_at(g,1,&t)==FOX_OK&&t.type==FOX_GGML_TQ2_0&&t.offset==54,"TQ2 tensor descriptor works");
+    memset(tensor_data, 0xff, sizeof(tensor_data));
+    CHECK(fox_gguf_read_tensor(g, 0, tensor_data, sizeof(tensor_data)) == FOX_OK &&
+          tensor_data[0] == 0 && tensor_data[53] == 0,
+          "a validated tensor can be loaded into resident memory");
+    CHECK(fox_gguf_read_tensor(g, 0, tensor_data, sizeof(tensor_data) - 1) == FOX_ERR_ARG,
+          "tensor loading rejects undersized resident buffers");
     fox_gguf_close(g);
     remove(path);
     CHECK(fox_gguf_open("missing.gguf",&g)==FOX_ERR_IO,"missing files report IO");

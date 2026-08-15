@@ -41,6 +41,33 @@ jobs:
       - name: json is parseable
         run: ./build/fox probe --json | python3 -m json.tool > /dev/null
 
+      - name: every declared public symbol actually exists
+        if: matrix.cc == 'gcc'
+        run: |
+          python3 - <<'PY'
+          import re, subprocess, sys
+
+          header = open('include/fox/fox.h').read()
+          header = re.sub(r'#\s*define[^\n]*(\\\n[^\n]*)*', '', header)
+
+          declared = set(re.findall(r'\b(fox_[a-z0-9_]+)\s*\(', header))
+          declared -= set(re.findall(r'typedef[^;]*\(\s*\*\s*(fox_[a-z0-9_]+)\s*\)', header))
+
+          nm = subprocess.run(['nm', '-g', '--defined-only', 'build/libfoxcore.a'],
+                              capture_output=True, text=True)
+          defined = set(re.findall(r'\b[TtWwDdBb]\s+(fox_[a-z0-9_]+)\b', nm.stdout))
+
+          missing = sorted(declared - defined)
+          if missing:
+              print('These are declared in the public header but not defined anywhere.')
+              print('Anything calling them will fail to link:')
+              for m in missing:
+                  print('  ', m)
+              sys.exit(1)
+
+          print(f'ok: all {len(declared)} declared public functions are defined')
+          PY
+
   linux-arm64:
     name: linux arm64
     runs-on: ubuntu-24.04-arm
