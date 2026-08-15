@@ -14,6 +14,7 @@ static int usage(FILE *fp, int rc)
         "\n"
         "commands:\n"
         "  run              generate text from a GGUF model\n"
+        "  repack           arrange a GGUF for contiguous streamed layers\n"
         "  probe            report cpu, memory, cgroup limits, storage and gpu\n"
         "  watch            run the residency governor live and print each tick\n"
         "  version          print the version and exit\n"
@@ -47,6 +48,25 @@ static int usage(FILE *fp, int rc)
         "  FOX_CACHE        where repacked models and scratch files live\n",
         fox_version());
     return rc;
+}
+
+static int cmd_repack(int argc, char **argv)
+{
+    fox_status st;
+
+    if (argc != 2) {
+        fprintf(stderr, "usage: fox repack <input.gguf> <output.foxpack>\n");
+        return 2;
+    }
+
+    st = fox_repack_gguf(argv[0], argv[1]);
+    if (st != FOX_OK) {
+        fprintf(stderr, "fox repack: %s: %s\n",
+                fox_status_str(st), fox_last_error());
+        return 1;
+    }
+    printf("repacked %s -> %s\n", argv[0], argv[1]);
+    return 0;
 }
 
 static int arg_matches(const char *a, const char *name)
@@ -376,6 +396,7 @@ int main(int argc, char **argv)
 
     if (arg_matches(argv[1], "probe")) return cmd_probe(argc - 2, argv + 2);
     if (arg_matches(argv[1], "watch")) return cmd_watch(argc - 2, argv + 2);
+    if (arg_matches(argv[1], "repack")) return cmd_repack(argc - 2, argv + 2);
     if (arg_matches(argv[1], "run"))   return cmd_run(argc - 2, argv + 2);
 
     fprintf(stderr, "fox: unknown command '%s'\n\n", argv[1]);

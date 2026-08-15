@@ -43,6 +43,14 @@ struct fox_weights {
     uint64_t          held_bytes;
     size_t            live_leases;
     fox_mutex        *lock;
+    fox_thread        *prefetch_thread;
+    fox_cond          *prefetch_cond;
+    int                prefetch_stop;
+    int                prefetch_pending;
+    int                prefetch_busy;
+    int                prefetch_complete;
+    size_t             prefetch_tensor;
+    fox_status         prefetch_status;
 };
 
 static const size_t SLOT_EMPTY = (size_t)-1;
@@ -61,14 +69,15 @@ static fox_status read_range_into(fox_weights *w, uint64_t offset,
     if (got != (int64_t)bytes)
         return fox_fail(FOX_ERR_IO, "weights: short read on '%s'",
                         name ? name : "span");
-    w->reads++;
     return FOX_OK;
 }
 
 static fox_status read_tensor_into(fox_weights *w, const fox_gguf_tensor *t,
                                    uint8_t *dst)
 {
-    return read_range_into(w, t->offset, t->size_bytes, dst, t->name);
+    fox_status st = read_range_into(w, t->offset, t->size_bytes, dst, t->name);
+    if (st == FOX_OK) w->reads++;
+    return st;
 }
 
 static void slot_free(fox_weights *w, fox_slot *s)
@@ -304,6 +313,9 @@ static fox_status stream_into_slot(fox_weights *w, size_t tensor_index,
         span_offset = w->pack_spans[tensor_index].offset;
         span_bytes = w->pack_spans[tensor_index].bytes;
     }
+    if (span_bytes > SIZE_MAX)
+        return fox_fail(FOX_ERR_FORMAT, "weights: span for '%s' is too large",
+                        t.name);
 
     st = make_room(w, span_bytes);
     if (st != FOX_OK) return st;
@@ -335,9 +347,80 @@ static fox_status stream_into_slot(fox_weights *w, size_t tensor_index,
     s->tensor_index = tensor_index;
     s->pins         = 0;
     s->last_used    = ++w->clock;
+    w->reads++;
     w->held_bytes  += span_bytes;
 
     *out = s;
+    return FOX_OK;
+}
+
+static fox_status stream_prefetch_into_slot(fox_weights *w,
+                                            size_t tensor_index)
+{
+    fox_gguf_tensor t;
+    fox_slot *s;
+    uint8_t *buf;
+    uint64_t span_offset;
+    uint64_t span_bytes;
+    fox_status st;
+
+    st = fox_gguf_tensor_at(w->model, tensor_index, &t);
+    if (st != FOX_OK) return st;
+    span_offset = t.offset;
+    span_bytes = t.size_bytes;
+    if (w->pack_spans) {
+        span_offset = w->pack_spans[tensor_index].offset;
+        span_bytes = w->pack_spans[tensor_index].bytes;
+    }
+    if (span_bytes > SIZE_MAX)
+        return fox_fail(FOX_ERR_FORMAT, "weights: prefetch span for '%s' is too large",
+                        t.name);
+
+    buf = (uint8_t *)fox_aligned_alloc(4096, (size_t)span_bytes);
+    if (!buf)
+        return fox_fail(FOX_ERR_NOMEM, "weights: prefetch allocation for '%s'",
+                        t.name);
+    st = read_range_into(w, span_offset, span_bytes, buf, t.name);
+    if (st != FOX_OK) {
+        fox_aligned_free(buf);
+        return st;
+    }
+
+    fox_mutex_lock(w->lock);
+    if (slot_find(w, tensor_index)) {
+        w->reads++;
+        fox_mutex_unlock(w->lock);
+        fox_aligned_free(buf);
+        return FOX_OK;
+    }
+    st = make_room(w, span_bytes);
+    if (st != FOX_OK) {
+        fox_mutex_unlock(w->lock);
+        fox_aligned_free(buf);
+        return st;
+    }
+    s = slot_empty(w);
+    if (!s) {
+        s = slot_lru_unpinned(w);
+        if (!s) {
+            fox_mutex_unlock(w->lock);
+            fox_aligned_free(buf);
+            return fox_fail(FOX_ERR_NOMEM,
+                            "weights: prefetch cannot evict a pinned slot");
+        }
+        slot_free(w, s);
+        w->evictions++;
+    }
+
+    s->buf = buf;
+    s->bytes = span_bytes;
+    s->file_offset = span_offset;
+    s->tensor_index = tensor_index;
+    s->pins = 0;
+    s->last_used = ++w->clock;
+    w->held_bytes += span_bytes;
+    w->reads++;
+    fox_mutex_unlock(w->lock);
     return FOX_OK;
 }
 
@@ -378,6 +461,37 @@ static fox_status load_resident(fox_weights *w, size_t index)
     return FOX_OK;
 }
 
+static void prefetch_worker(void *arg)
+{
+    fox_weights *w = (fox_weights *)arg;
+
+    for (;;) {
+        size_t tensor_index;
+        fox_status st;
+
+        fox_mutex_lock(w->lock);
+        while (!w->prefetch_stop && !w->prefetch_pending)
+            fox_cond_wait(w->prefetch_cond, w->lock);
+        if (w->prefetch_stop) {
+            fox_mutex_unlock(w->lock);
+            return;
+        }
+        tensor_index = w->prefetch_tensor;
+        w->prefetch_pending = 0;
+        w->prefetch_busy = 1;
+        fox_mutex_unlock(w->lock);
+
+        st = fox_weights_prefetch(w, tensor_index);
+
+        fox_mutex_lock(w->lock);
+        w->prefetch_status = st;
+        w->prefetch_busy = 0;
+        w->prefetch_complete = 1;
+        fox_cond_broadcast(w->prefetch_cond);
+        fox_mutex_unlock(w->lock);
+    }
+}
+
 fox_status fox_weights_open(const char *gguf_path, fox_weights_mode mode,
                             uint64_t budget_bytes, fox_weights **out)
 {
@@ -396,6 +510,7 @@ fox_status fox_weights_open(const char *gguf_path, fox_weights_mode mode,
 
     w->mode         = mode;
     w->budget_bytes = budget_bytes;
+    w->is_pack      = mode == FOX_WEIGHTS_STREAM && pack_suffix(gguf_path);
 
     for (i = 0; i < FOX_SLOT_COUNT; i++) w->slots[i].tensor_index = SLOT_EMPTY;
 
@@ -415,10 +530,19 @@ fox_status fox_weights_open(const char *gguf_path, fox_weights_mode mode,
             w->largest_tensor = t.size_bytes;
     }
 
+    st = build_pack_spans(w);
+    if (st != FOX_OK) {
+        fox_gguf_close(w->model);
+        free(w->pack_spans);
+        free(w);
+        return st;
+    }
+
     if (mode == FOX_WEIGHTS_STREAM && budget_bytes > 0 &&
         w->largest_tensor > budget_bytes) {
         uint64_t largest = w->largest_tensor;
         fox_gguf_close(w->model);
+        free(w->pack_spans);
         free(w);
         return fox_fail(FOX_ERR_NOMEM,
                         "weights: the largest tensor is %llu bytes and the "
@@ -433,6 +557,7 @@ fox_status fox_weights_open(const char *gguf_path, fox_weights_mode mode,
                                          sizeof(*w->resident));
         if (!w->resident) {
             fox_gguf_close(w->model);
+            free(w->pack_spans);
             free(w);
             return fox_fail(FOX_ERR_NOMEM, "weights: residency table");
         }
@@ -442,6 +567,7 @@ fox_status fox_weights_open(const char *gguf_path, fox_weights_mode mode,
     if (!w->lock) {
         free(w->resident);
         fox_gguf_close(w->model);
+        free(w->pack_spans);
         free(w);
         return fox_fail(FOX_ERR_NOMEM, "weights: lock");
     }
@@ -453,9 +579,34 @@ fox_status fox_weights_open(const char *gguf_path, fox_weights_mode mode,
     if (!w->file) {
         fox_mutex_destroy(w->lock);
         free(w->resident);
+        free(w->pack_spans);
         fox_gguf_close(w->model);
         free(w);
         return FOX_ERR_IO;
+    }
+
+    if (w->is_pack) {
+        w->prefetch_cond = fox_cond_create();
+        if (!w->prefetch_cond) {
+            fox_file_close(w->file);
+            fox_mutex_destroy(w->lock);
+            free(w->resident);
+            free(w->pack_spans);
+            fox_gguf_close(w->model);
+            free(w);
+            return fox_fail(FOX_ERR_NOMEM, "weights: prefetch condition");
+        }
+        w->prefetch_thread = fox_thread_start(prefetch_worker, w);
+        if (!w->prefetch_thread) {
+            fox_cond_destroy(w->prefetch_cond);
+            fox_file_close(w->file);
+            fox_mutex_destroy(w->lock);
+            free(w->resident);
+            free(w->pack_spans);
+            fox_gguf_close(w->model);
+            free(w);
+            return fox_fail(FOX_ERR_NOMEM, "weights: prefetch worker");
+        }
     }
 
     *out = w;
@@ -467,6 +618,15 @@ void fox_weights_close(fox_weights *w)
     size_t i;
 
     if (!w) return;
+
+    if (w->prefetch_thread) {
+        fox_mutex_lock(w->lock);
+        w->prefetch_stop = 1;
+        fox_cond_broadcast(w->prefetch_cond);
+        fox_mutex_unlock(w->lock);
+        fox_thread_join(w->prefetch_thread);
+        w->prefetch_thread = NULL;
+    }
 
     if (w->live_leases > 0)
         FOX_WARN("weights: closing with %llu lease(s) still held",
@@ -480,6 +640,8 @@ void fox_weights_close(fox_weights *w)
     for (i = 0; i < FOX_SLOT_COUNT; i++)
         if (w->slots[i].buf) fox_aligned_free(w->slots[i].buf);
 
+    free(w->pack_spans);
+    if (w->prefetch_cond) fox_cond_destroy(w->prefetch_cond);
     if (w->lock)  fox_mutex_destroy(w->lock);
     if (w->file)  fox_file_close(w->file);
     if (w->model) fox_gguf_close(w->model);
@@ -498,20 +660,83 @@ fox_weights_mode fox_weights_get_mode(const fox_weights *w)
 
 fox_status fox_weights_prefetch(fox_weights *w, size_t tensor_index)
 {
-    fox_status st = FOX_OK;
+    fox_status st;
+    int already_loaded;
 
     if (!w) return FOX_ERR_ARG;
     if (tensor_index >= w->n_tensors) return FOX_ERR_NOTFOUND;
 
-    fox_mutex_lock(w->lock);
     if (w->mode == FOX_WEIGHTS_RESIDENT) {
+        fox_mutex_lock(w->lock);
         if (!w->resident[tensor_index]) st = load_resident(w, tensor_index);
-    } else if (!slot_find(w, tensor_index)) {
-        fox_slot *s = NULL;
-        st = stream_into_slot(w, tensor_index, &s);
+        else st = FOX_OK;
+        fox_mutex_unlock(w->lock);
+        return st;
+    }
+
+    fox_mutex_lock(w->lock);
+    already_loaded = slot_find(w, tensor_index) != NULL;
+    fox_mutex_unlock(w->lock);
+    if (already_loaded) return FOX_OK;
+    return stream_prefetch_into_slot(w, tensor_index);
+}
+
+fox_status fox_weights_prefetch_async(fox_weights *w, size_t tensor_index)
+{
+    if (!w) return FOX_ERR_ARG;
+    if (tensor_index >= w->n_tensors) return FOX_ERR_NOTFOUND;
+    if (!w->prefetch_thread) return FOX_ERR_UNSUPPORTED;
+
+    fox_mutex_lock(w->lock);
+    if (slot_find(w, tensor_index)) {
+        fox_mutex_unlock(w->lock);
+        return FOX_OK;
+    }
+    if (w->prefetch_pending || w->prefetch_busy) {
+        int same = w->prefetch_tensor == tensor_index;
+        fox_mutex_unlock(w->lock);
+        return same ? FOX_OK :
+            fox_fail(FOX_ERR_INTERNAL,
+                     "weights: only one asynchronous prefetch can be in flight");
+    }
+    w->prefetch_tensor = tensor_index;
+    w->prefetch_pending = 1;
+    w->prefetch_complete = 0;
+    fox_cond_broadcast(w->prefetch_cond);
+    fox_mutex_unlock(w->lock);
+    return FOX_OK;
+}
+
+fox_status fox_weights_prefetch_wait(fox_weights *w, size_t tensor_index)
+{
+    fox_status st;
+
+    if (!w) return FOX_ERR_ARG;
+    if (tensor_index >= w->n_tensors) return FOX_ERR_NOTFOUND;
+    if (!w->prefetch_thread) return FOX_ERR_UNSUPPORTED;
+
+    fox_mutex_lock(w->lock);
+    if (slot_find(w, tensor_index)) {
+        fox_mutex_unlock(w->lock);
+        return FOX_OK;
+    }
+    if (w->prefetch_pending || w->prefetch_busy) {
+        if (w->prefetch_tensor != tensor_index) {
+            fox_mutex_unlock(w->lock);
+            return fox_fail(FOX_ERR_INTERNAL,
+                            "weights: waiting for a different prefetch target");
+        }
+        while (w->prefetch_pending || w->prefetch_busy)
+            fox_cond_wait(w->prefetch_cond, w->lock);
+    }
+    if (w->prefetch_complete && w->prefetch_tensor == tensor_index) {
+        st = w->prefetch_status;
+        w->prefetch_complete = 0;
+        fox_mutex_unlock(w->lock);
+        return st;
     }
     fox_mutex_unlock(w->lock);
-    return st;
+    return FOX_ERR_UNSUPPORTED;
 }
 
 fox_status fox_weights_acquire(fox_weights *w, size_t tensor_index,
@@ -566,7 +791,7 @@ fox_status fox_weights_acquire(fox_weights *w, size_t tensor_index,
         }
         s->pins++;
         s->last_used = ++w->clock;
-        lease->data = s->buf;
+        lease->data = s->buf + (t.offset - s->file_offset);
         lease->slot = s;
     }
 

@@ -303,6 +303,7 @@ static fox_status forward_batch(fox_context *ctx, const uint32_t *tokens,
     fox_status st;
     uint32_t l;
     size_t i;
+    size_t prefetched = FOX_TENSOR_ABSENT;
 
     if ((size_t)ctx->pos + n > n_ctx)
         return fox_fail(FOX_ERR_ARG,
@@ -318,11 +319,22 @@ static fox_status forward_batch(fox_context *ctx, const uint32_t *tokens,
         const fox_layer_tensors *lt = &m->layers[l];
         size_t layer_base = (size_t)l * n_ctx * ctx->n_kv_embd;
 
+        if (prefetched == lt->attn_norm) {
+            (void)fox_weights_prefetch_wait(m->weights, prefetched);
+            prefetched = FOX_TENSOR_ABSENT;
+        }
+
         st = norm_weights(ctx, lt->attn_norm, n_embd, &w);
         if (st != FOX_OK) return st;
         for (i = 0; i < n; i++)
             fox_rmsnorm(ctx->xb + i * ctx->wide, ctx->x + i * n_embd, w,
                         n_embd, mi->rms_eps);
+
+        if (l + 1 < mi->n_layer) {
+            size_t next_norm = m->layers[l + 1].attn_norm;
+            if (fox_weights_prefetch_async(m->weights, next_norm) == FOX_OK)
+                prefetched = next_norm;
+        }
 
         st = project(ctx, lt->attn_q, n, ctx->xb, ctx->wide, ctx->q, ctx->n_q_embd);
         if (st != FOX_OK) return st;

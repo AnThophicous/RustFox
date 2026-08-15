@@ -394,6 +394,8 @@ fox_status fox_weights_acquire(fox_weights *w, size_t tensor_index,
                                fox_weights_lease *lease);
 void       fox_weights_release(fox_weights *w, fox_weights_lease *lease);
 fox_status fox_weights_prefetch(fox_weights *w, size_t tensor_index);
+fox_status fox_weights_prefetch_async(fox_weights *w, size_t tensor_index);
+fox_status fox_weights_prefetch_wait(fox_weights *w, size_t tensor_index);
 
 size_t     fox_weights_live_leases(const fox_weights *w);
 uint64_t   fox_weights_resident_bytes(const fox_weights *w);
