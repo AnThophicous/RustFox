@@ -249,6 +249,53 @@ const char *fox_ggml_type_name(fox_ggml_type type);
 uint32_t fox_ggml_type_block_size(fox_ggml_type type);
 uint32_t fox_ggml_type_block_bytes(fox_ggml_type type);
 
+typedef enum {
+    FOX_PLAN_PIN = 0,
+    FOX_PLAN_STREAM,
+    FOX_PLAN_MMAP
+} fox_plan_placement;
+
+typedef struct {
+    uint64_t residency_budget_bytes;
+    double seq_read_mbps;
+    double compute_tok_s;
+} fox_plan_config;
+
+typedef struct {
+    size_t tensor_index;
+    fox_plan_placement placement;
+    uint64_t bytes;
+    uint32_t priority;
+    const char *reason;
+} fox_plan_item;
+
+typedef struct {
+    uint64_t model_bytes;
+    uint64_t pinned_bytes;
+    uint64_t mmap_bytes;
+    uint64_t streamed_bytes;
+    double io_seconds;
+    double compute_seconds;
+    double predicted_tok_s;
+} fox_plan_summary;
+
+typedef struct fox_plan fox_plan;
+
+fox_status fox_plan_build(const fox_gguf *model, const fox_plan_config *config,
+                          fox_plan **out);
+void fox_plan_destroy(fox_plan *plan);
+size_t fox_plan_count(const fox_plan *plan);
+fox_status fox_plan_item_at(const fox_plan *plan, size_t index,
+                            fox_plan_item *out);
+fox_status fox_plan_get_summary(const fox_plan *plan, fox_plan_summary *out);
+
+fox_status fox_tq1_dot_i8(const int8_t *activations, const void *block_data,
+                          size_t n, float *out);
+fox_status fox_tq2_dot_i8(const int8_t *activations, const void *block_data,
+                          size_t n, float *out);
+fox_status fox_tq2_dot_i8_scalar(const int8_t *activations, const void *block_data,
+                                 size_t n, float *out);
+
 #ifdef __cplusplus
 }
 #endif

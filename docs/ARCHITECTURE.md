@@ -16,6 +16,20 @@ stream, or mmap placement. TQ1_0 and TQ2_0 are recognized using the canonical
 GGML block sizes, while decoding their packed values remains the kernel layer's
 responsibility.
 
+## 10. Placement and kernel boundaries
+
+`planner.c` consumes only validated tensor descriptors and measured inputs. Its
+output is a snapshot: pin hot per-token tensors until the residency budget is
+full, mmap sparse embeddings, and stream the remaining projections. A zero
+storage measurement intentionally produces zero tok/s rather than an invented
+estimate.
+
+`ternary.c` is independent of placement. Its scalar implementation is the
+reference for both ternary formats; TQ2_0 additionally has an SSSE3 `pshufb`
+decode path selected only after the runtime feature probe confirms SSSE3. The
+planner never calls a kernel, and a kernel never assumes a particular storage
+policy.
+
 ## 1. Layering
 
 ```
