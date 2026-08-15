@@ -10,11 +10,16 @@ libc. Linux and Docker first, VPS second, native Windows third.
 The target is not a workstation. The target is a 4 GB Celeron laptop, a €4/month
 VPS, an old office box someone was about to throw away.
 
-> **Status: early.** The substrate is real and tested — hardware probing,
-> cgroup awareness, and the residency governor all work today and are exercised
-> in CI on x86_64, arm64, musl, macOS, and Windows. The model loader, kernels,
-> and forward pass are not written yet. See [Roadmap](#roadmap) for exactly
-> what exists.
+> **Status: early, but the hard part works.** Hardware probing, cgroup
+> awareness, the residency governor, the GGUF parser, the quantised kernels,
+> and both weight backends — resident and streaming — are implemented and
+> exercised in CI on x86_64, arm64, musl, macOS and Windows. CI asserts that
+> streaming returns byte-for-byte what resident returns while staying inside a
+> budget tight enough to force eviction on every pass.
+>
+> **It does not generate tokens yet.** The transformer forward pass, KV cache
+> and sampler are still being written. See [Roadmap](#roadmap) for exactly what
+> exists.
 
 ---
 
@@ -232,13 +237,19 @@ heuristic.
 | ✅ | Storage probe — device, rotational, measured bandwidth and latency | done |
 | ✅ | PSI / pressure telemetry, cgroup-local where applicable | done |
 | ✅ | AIMD residency governor | done |
-| 🚧 | GGUF parser and tensor table | next |
-| 🚧 | Placement planner with tok/s prediction | next |
+| ✅ | GGUF parser — metadata, arrays, tensor table, all block layouts | done |
+| ✅ | Placement planner with tok/s prediction | done |
+| ✅ | Ternary kernels TQ1_0 / TQ2_0, SSSE3 path for TQ2_0 | done |
+| ✅ | F32, F16, Q4_0/1, Q5_0/1, Q8_0, Q4_K, Q6_K kernels | done |
+| ✅ | Threadpool and multi-threaded GEMV | done |
+| ✅ | Weights lease API — resident and streaming behind one contract | done |
+| ✅ | Streaming backend — LRU slots, hard budget, verified vs resident | done |
+| ✅ | Tokenizer | done |
+| 🚧 | Transformer forward pass, KV cache, sampler, `fox run` | in progress |
+| 🚧 | Async prefetch — overlap layer N+1 with the compute of layer N | next |
 | 🚧 | Layer-contiguous repack (`.foxpack`) for sequential streaming | planned |
-| 🚧 | Async prefetch ring — threaded `pread`, then `io_uring` | planned |
-| 🚧 | Ternary kernels TQ1_0 / TQ2_0, `pshufb` LUT path | planned |
-| 🚧 | Q4_0 / Q8_0 / F16 kernels for above-1-bit models | planned |
-| 🚧 | Transformer forward pass, KV cache | planned |
+| 🚧 | Vectorised TQ1_0 | planned |
+| 🚧 | `io_uring` fast path on Linux | planned |
 | 🚧 | Speculative decoding — the multiplier for streamed dense models | planned |
 | 🚧 | Vulkan backend for integrated GPUs | later |
 
