@@ -14,6 +14,7 @@ typedef struct {
     size_t   tensor_index;
     uint64_t last_used;
     unsigned pins;
+    int      reserved;
 } fox_slot;
 
 typedef struct {
@@ -90,6 +91,18 @@ static void slot_free(fox_weights *w, fox_slot *s)
     s->file_offset = 0;
     s->tensor_index = SLOT_EMPTY;
     s->pins = 0;
+    s->reserved = 0;
+}
+
+static void slot_cancel_reservation(fox_weights *w, fox_slot *s)
+{
+    if (!s->reserved) return;
+    w->held_bytes -= s->bytes;
+    s->bytes = 0;
+    s->file_offset = 0;
+    s->tensor_index = SLOT_EMPTY;
+    s->pins = 0;
+    s->reserved = 0;
 }
 
 static int layer_number(const char *name, uint32_t *out)
@@ -232,6 +245,13 @@ static fox_status build_pack_spans(fox_weights *w)
     return FOX_OK;
 }
 
+static int slot_covers(const fox_slot *s, const fox_gguf_tensor *t)
+{
+    return s->file_offset <= t->offset &&
+           t->offset - s->file_offset <= s->bytes &&
+           t->size_bytes <= s->bytes - (t->offset - s->file_offset);
+}
+
 static fox_slot *slot_find(fox_weights *w, size_t tensor_index)
 {
     int i;
@@ -240,11 +260,7 @@ static fox_slot *slot_find(fox_weights *w, size_t tensor_index)
     if (fox_gguf_tensor_at(w->model, tensor_index, &t) != FOX_OK)
         return NULL;
     for (i = 0; i < FOX_SLOT_COUNT; i++)
-        if (w->slots[i].buf &&
-            w->slots[i].file_offset <= t.offset &&
-            t.offset - w->slots[i].file_offset <= w->slots[i].bytes &&
-            t.size_bytes <= w->slots[i].bytes -
-                            (t.offset - w->slots[i].file_offset))
+        if (w->slots[i].buf && slot_covers(&w->slots[i], &t))
             return &w->slots[i];
     return NULL;
 }
@@ -256,7 +272,7 @@ static fox_slot *slot_lru_unpinned(fox_weights *w)
 
     for (i = 0; i < FOX_SLOT_COUNT; i++) {
         fox_slot *s = &w->slots[i];
-        if (!s->buf || s->pins > 0) continue;
+        if (!s->buf || s->reserved || s->pins > 0) continue;
         if (!best || s->last_used < best->last_used) best = s;
     }
     return best;
@@ -266,7 +282,7 @@ static fox_slot *slot_empty(fox_weights *w)
 {
     int i;
     for (i = 0; i < FOX_SLOT_COUNT; i++)
-        if (!w->slots[i].buf) return &w->slots[i];
+        if (!w->slots[i].buf && !w->slots[i].reserved) return &w->slots[i];
     return NULL;
 }
 
@@ -376,27 +392,14 @@ static fox_status stream_prefetch_into_slot(fox_weights *w,
         return fox_fail(FOX_ERR_FORMAT, "weights: prefetch span for '%s' is too large",
                         t.name);
 
-    buf = (uint8_t *)fox_aligned_alloc(4096, (size_t)span_bytes);
-    if (!buf)
-        return fox_fail(FOX_ERR_NOMEM, "weights: prefetch allocation for '%s'",
-                        t.name);
-    st = read_range_into(w, span_offset, span_bytes, buf, t.name);
-    if (st != FOX_OK) {
-        fox_aligned_free(buf);
-        return st;
-    }
-
     fox_mutex_lock(w->lock);
     if (slot_find(w, tensor_index)) {
-        w->reads++;
         fox_mutex_unlock(w->lock);
-        fox_aligned_free(buf);
         return FOX_OK;
     }
     st = make_room(w, span_bytes);
     if (st != FOX_OK) {
         fox_mutex_unlock(w->lock);
-        fox_aligned_free(buf);
         return st;
     }
     s = slot_empty(w);
@@ -404,7 +407,6 @@ static fox_status stream_prefetch_into_slot(fox_weights *w,
         s = slot_lru_unpinned(w);
         if (!s) {
             fox_mutex_unlock(w->lock);
-            fox_aligned_free(buf);
             return fox_fail(FOX_ERR_NOMEM,
                             "weights: prefetch cannot evict a pinned slot");
         }
@@ -412,16 +414,48 @@ static fox_status stream_prefetch_into_slot(fox_weights *w,
         w->evictions++;
     }
 
-    s->buf = buf;
+    s->buf = NULL;
     s->bytes = span_bytes;
     s->file_offset = span_offset;
     s->tensor_index = tensor_index;
     s->pins = 0;
     s->last_used = ++w->clock;
+    s->reserved = 1;
     w->held_bytes += span_bytes;
+    fox_mutex_unlock(w->lock);
+
+    buf = (uint8_t *)fox_aligned_alloc(4096, (size_t)span_bytes);
+    if (!buf) {
+        st = fox_fail(FOX_ERR_NOMEM, "weights: prefetch allocation for '%s'",
+                      t.name);
+        goto cancel;
+    }
+    st = read_range_into(w, span_offset, span_bytes, buf, t.name);
+    if (st != FOX_OK) goto cancel;
+
+    fox_mutex_lock(w->lock);
+    if (slot_find(w, tensor_index)) {
+        slot_cancel_reservation(w, s);
+        w->reads++;
+        if (w->prefetch_cond) fox_cond_broadcast(w->prefetch_cond);
+        fox_mutex_unlock(w->lock);
+        fox_aligned_free(buf);
+        return FOX_OK;
+    }
+    s->buf = buf;
+    s->reserved = 0;
     w->reads++;
+    if (w->prefetch_cond) fox_cond_broadcast(w->prefetch_cond);
     fox_mutex_unlock(w->lock);
     return FOX_OK;
+
+cancel:
+    if (buf) fox_aligned_free(buf);
+    fox_mutex_lock(w->lock);
+    slot_cancel_reservation(w, s);
+    if (w->prefetch_cond) fox_cond_broadcast(w->prefetch_cond);
+    fox_mutex_unlock(w->lock);
+    return st;
 }
 
 static fox_status load_resident(fox_weights *w, size_t index)
@@ -779,15 +813,45 @@ fox_status fox_weights_acquire(fox_weights *w, size_t tensor_index,
         lease->data = w->resident[tensor_index];
         lease->slot = NULL;
     } else {
-        fox_slot *s = slot_find(w, tensor_index);
-        if (s) {
-            w->hits++;
-        } else {
+        fox_slot *s;
+
+        for (;;) {
+            int waiting = 0;
+            int i;
+
+            s = slot_find(w, tensor_index);
+            if (s) {
+                w->hits++;
+                break;
+            }
+
+            if (w->prefetch_cond) {
+                for (i = 0; i < FOX_SLOT_COUNT; i++) {
+                    fox_gguf_tensor reserved_tensor;
+                    fox_slot *candidate = &w->slots[i];
+
+                    if (!candidate->reserved ||
+                        fox_gguf_tensor_at(w->model,
+                                           candidate->tensor_index,
+                                           &reserved_tensor) != FOX_OK)
+                        continue;
+                    if (slot_covers(candidate, &t)) {
+                        waiting = 1;
+                        break;
+                    }
+                }
+            }
+            if (waiting) {
+                fox_cond_wait(w->prefetch_cond, w->lock);
+                continue;
+            }
+
             st = stream_into_slot(w, tensor_index, &s);
             if (st != FOX_OK) {
                 fox_mutex_unlock(w->lock);
                 return st;
             }
+            break;
         }
         s->pins++;
         s->last_used = ++w->clock;
