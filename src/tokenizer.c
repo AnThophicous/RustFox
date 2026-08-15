@@ -174,21 +174,23 @@ static int make_sentencepiece_input(const char *text, char **out, size_t *length
     size_t capacity;
     size_t i, n = 0;
     char *normalized;
+    unsigned char *bytes;
 
     if (input_length > (SIZE_MAX - 4) / 4) return 0;
     capacity = input_length * 4 + 4;
     normalized = (char *)malloc(capacity);
     if (!normalized) return -1;
-    normalized[n++] = (char)0xe2;
-    normalized[n++] = (char)0x96;
-    normalized[n++] = (char)0x81;
+    bytes = (unsigned char *)normalized;
+    bytes[n++] = 0xE2;
+    bytes[n++] = 0x96;
+    bytes[n++] = 0x81;
     for (i = 0; i < input_length; i++) {
         if (text[i] == ' ' || text[i] == '\t' || text[i] == '\n' || text[i] == '\r') {
-            normalized[n++] = (char)0xe2;
-            normalized[n++] = (char)0x96;
-            normalized[n++] = (char)0x81;
+            bytes[n++] = 0xE2;
+            bytes[n++] = 0x96;
+            bytes[n++] = 0x81;
         } else {
-            normalized[n++] = text[i];
+            bytes[n++] = (unsigned char)text[i];
         }
     }
     normalized[n] = '\0';
