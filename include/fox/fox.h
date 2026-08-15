@@ -241,10 +241,20 @@ size_t fox_gguf_metadata_count(const fox_gguf *g);
 size_t fox_gguf_tensor_count(const fox_gguf *g);
 size_t fox_gguf_find(const fox_gguf *g, const char *key);
 fox_gguf_value_type fox_gguf_metadata_type(const fox_gguf *g, size_t index);
+size_t fox_gguf_metadata_array_count(const fox_gguf *g, size_t index);
+fox_gguf_value_type fox_gguf_metadata_array_type(const fox_gguf *g, size_t index);
 fox_status fox_gguf_get_u32(const fox_gguf *g, size_t index, uint32_t *out);
 fox_status fox_gguf_get_string(const fox_gguf *g, size_t index, const char **out);
+fox_status fox_gguf_get_array_string(const fox_gguf *g, size_t index,
+                                     size_t element, const char **out);
+fox_status fox_gguf_get_array_i32(const fox_gguf *g, size_t index,
+                                  size_t element, int32_t *out);
+fox_status fox_gguf_get_array_f32(const fox_gguf *g, size_t index,
+                                  size_t element, float *out);
 fox_status fox_gguf_tensor_at(const fox_gguf *g, size_t index, fox_gguf_tensor *out);
 size_t fox_gguf_tensor_find(const fox_gguf *g, const char *name);
+fox_status fox_gguf_read_tensor(const fox_gguf *g, size_t index,
+                                 void *dst, size_t capacity);
 const char *fox_ggml_type_name(fox_ggml_type type);
 uint32_t fox_ggml_type_block_size(fox_ggml_type type);
 uint32_t fox_ggml_type_block_bytes(fox_ggml_type type);

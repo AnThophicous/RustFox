@@ -8,9 +8,14 @@ typedef struct {
     fox_gguf_value_type type;
     uint64_t u64;
     char *string;
+    fox_gguf_value_type array_type;
+    size_t array_count;
+    char **array_strings;
+    uint64_t *array_values;
 } fox_gguf_meta;
 
 struct fox_gguf {
+    char *path;
     uint32_t version;
     uint64_t file_size;
     uint64_t data_offset;
