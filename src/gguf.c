@@ -243,9 +243,9 @@ static fox_status read_tensors(reader *r, fox_gguf *g)
     for (i = 0; i < g->n_tensors; i++) {
         fox_gguf_tensor *t = &g->tensors[i];
         fox_status rc = FOX_ERR_FORMAT;
-        uint32_t dims, type, block, block_bytes;
+        uint32_t dims = 0, type = 0, block = 0, block_bytes = 0;
         uint64_t elements = 1;
-        uint64_t offset, bytes;
+        uint64_t offset = 0, bytes = 0;
 
         if (!str_read(r, (char **)&t->name, &rc))
             return fox_fail(rc, "gguf: bad tensor name at index %llu",
