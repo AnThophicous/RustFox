@@ -24,6 +24,7 @@ set(FOX_SOURCES
     src/pressure.c
     src/governor.c
     src/gguf.c
+    src/repack.c
     src/planner.c
     src/ternary.c
     src/tokenizer.c
@@ -113,7 +114,8 @@ endif()
 if(FOX_BUILD_TESTS)
     enable_testing()
     set(FOX_TESTS test_probe test_governor test_gguf test_gguf_arrays test_planner
-                  test_ternary test_gemv test_weights test_tokenizer test_kernels test_forward)
+                  test_ternary test_gemv test_weights test_repack test_tokenizer
+                  test_kernels test_forward)
     foreach(t IN LISTS FOX_TESTS)
         add_executable(${t} tests/${t}.c)
         target_link_libraries(${t} PRIVATE foxcore)

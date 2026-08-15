@@ -10,10 +10,16 @@
 typedef struct {
     uint8_t *buf;
     uint64_t bytes;
+    uint64_t file_offset;
     size_t   tensor_index;
     uint64_t last_used;
     unsigned pins;
 } fox_slot;
+
+typedef struct {
+    uint64_t offset;
+    uint64_t bytes;
+} fox_pack_span;
 
 struct fox_weights {
     fox_gguf         *model;
@@ -23,6 +29,8 @@ struct fox_weights {
     uint64_t          data_offset;
     size_t            n_tensors;
     uint64_t          largest_tensor;
+    fox_pack_span    *pack_spans;
+    int               is_pack;
 
     uint8_t         **resident;
 
@@ -39,15 +47,28 @@ struct fox_weights {
 
 static const size_t SLOT_EMPTY = (size_t)-1;
 
+static fox_status read_range_into(fox_weights *w, uint64_t offset,
+                                  uint64_t bytes, uint8_t *dst,
+                                  const char *name)
+{
+    int64_t got;
+
+    if (offset > UINT64_MAX - w->data_offset || bytes > SIZE_MAX)
+        return fox_fail(FOX_ERR_FORMAT, "weights: range for '%s' overflows",
+                        name ? name : "span");
+    got = fox_file_pread(w->file, dst, (size_t)bytes,
+                         w->data_offset + offset);
+    if (got != (int64_t)bytes)
+        return fox_fail(FOX_ERR_IO, "weights: short read on '%s'",
+                        name ? name : "span");
+    w->reads++;
+    return FOX_OK;
+}
+
 static fox_status read_tensor_into(fox_weights *w, const fox_gguf_tensor *t,
                                    uint8_t *dst)
 {
-    int64_t got = fox_file_pread(w->file, dst, (size_t)t->size_bytes,
-                                 w->data_offset + t->offset);
-    if (got != (int64_t)t->size_bytes)
-        return fox_fail(FOX_ERR_IO, "weights: short read on tensor '%s'", t->name);
-    w->reads++;
-    return FOX_OK;
+    return read_range_into(w, t->offset, t->size_bytes, dst, t->name);
 }
 
 static void slot_free(fox_weights *w, fox_slot *s)
@@ -57,15 +78,164 @@ static void slot_free(fox_weights *w, fox_slot *s)
     w->held_bytes -= s->bytes;
     s->buf = NULL;
     s->bytes = 0;
+    s->file_offset = 0;
     s->tensor_index = SLOT_EMPTY;
     s->pins = 0;
+}
+
+static int layer_number(const char *name, uint32_t *out)
+{
+    const char *p;
+    uint64_t value = 0;
+
+    if (!name || strncmp(name, "blk.", 4) != 0) return 0;
+    p = name + 4;
+    if (*p < '0' || *p > '9') return 0;
+    while (*p >= '0' && *p <= '9') {
+        value = value * 10u + (uint64_t)(*p - '0');
+        if (value > UINT32_MAX) return 0;
+        p++;
+    }
+    if (*p != '.') return 0;
+    *out = (uint32_t)value;
+    return 1;
+}
+
+static int pack_suffix(const char *path)
+{
+    size_t n;
+    if (!path) return 0;
+    n = strlen(path);
+    return n >= 8 && strcmp(path + n - 8, ".foxpack") == 0;
+}
+
+static int ranges_overlap(uint64_t a, uint64_t an,
+                          uint64_t b, uint64_t bn)
+{
+    uint64_t ae, be;
+    if (an > UINT64_MAX - a || bn > UINT64_MAX - b) return 1;
+    ae = a + an;
+    be = b + bn;
+    return a < be && b < ae;
+}
+
+static fox_status build_pack_spans(fox_weights *w)
+{
+    unsigned char *done;
+    size_t i, j, k;
+
+    if (!w->is_pack) return FOX_OK;
+    w->pack_spans = (fox_pack_span *)calloc(w->n_tensors ? w->n_tensors : 1,
+                                            sizeof(*w->pack_spans));
+    done = (unsigned char *)calloc(w->n_tensors ? w->n_tensors : 1, 1);
+    if (!w->pack_spans || !done) {
+        free(done);
+        return fox_fail(FOX_ERR_NOMEM, "weights: .foxpack span table");
+    }
+
+    for (i = 0; i < w->n_tensors; i++) {
+        fox_gguf_tensor ti;
+        uint32_t layer_i;
+        uint64_t start, end;
+        int has_layer;
+        int valid = 1;
+
+        if (done[i]) continue;
+        if (fox_gguf_tensor_at(w->model, i, &ti) != FOX_OK) {
+            free(done);
+            return FOX_ERR_FORMAT;
+        }
+        has_layer = layer_number(ti.name, &layer_i);
+        start = ti.offset;
+        end = ti.offset + ti.size_bytes;
+        if (end < ti.offset) valid = 0;
+
+        if (has_layer && valid) {
+            for (j = 0; j < w->n_tensors; j++) {
+                fox_gguf_tensor tj;
+                uint32_t layer_j;
+                uint64_t tj_end;
+
+                if (fox_gguf_tensor_at(w->model, j, &tj) != FOX_OK) {
+                    free(done);
+                    return FOX_ERR_FORMAT;
+                }
+                if (!layer_number(tj.name, &layer_j) || layer_j != layer_i)
+                    continue;
+                tj_end = tj.offset + tj.size_bytes;
+                if (tj_end < tj.offset) { valid = 0; break; }
+                if (tj.offset < start) start = tj.offset;
+                if (tj_end > end) end = tj_end;
+            }
+
+            for (k = 0; k < w->n_tensors && valid; k++) {
+                fox_gguf_tensor tk;
+                uint32_t layer_k;
+
+                if (fox_gguf_tensor_at(w->model, k, &tk) != FOX_OK) {
+                    free(done);
+                    return FOX_ERR_FORMAT;
+                }
+                if (layer_number(tk.name, &layer_k) && layer_k == layer_i)
+                    continue;
+                if (ranges_overlap(start, end - start, tk.offset,
+                                   tk.size_bytes))
+                    valid = 0;
+            }
+        }
+
+        if (!valid || !has_layer) {
+            start = ti.offset;
+            end = ti.offset + ti.size_bytes;
+        }
+        if (end < start) {
+            free(done);
+            return fox_fail(FOX_ERR_FORMAT, "weights: invalid .foxpack span");
+        }
+
+        for (j = 0; j < w->n_tensors; j++) {
+            fox_gguf_tensor tj;
+            uint32_t layer_j;
+
+            if (fox_gguf_tensor_at(w->model, j, &tj) != FOX_OK) {
+                free(done);
+                return FOX_ERR_FORMAT;
+            }
+            if (has_layer && valid && layer_number(tj.name, &layer_j) &&
+                layer_j == layer_i) {
+                w->pack_spans[j].offset = start;
+                w->pack_spans[j].bytes = end - start;
+                done[j] = 1;
+            }
+        }
+        if (!done[i]) {
+            w->pack_spans[i].offset = start;
+            w->pack_spans[i].bytes = end - start;
+            done[i] = 1;
+        }
+    }
+
+    for (i = 0; i < w->n_tensors; i++)
+        if (w->pack_spans[i].bytes > w->largest_tensor)
+            w->largest_tensor = w->pack_spans[i].bytes;
+
+    free(done);
+    return FOX_OK;
 }
 
 static fox_slot *slot_find(fox_weights *w, size_t tensor_index)
 {
     int i;
+    fox_gguf_tensor t;
+
+    if (fox_gguf_tensor_at(w->model, tensor_index, &t) != FOX_OK)
+        return NULL;
     for (i = 0; i < FOX_SLOT_COUNT; i++)
-        if (w->slots[i].buf && w->slots[i].tensor_index == tensor_index)
+        if (w->slots[i].buf &&
+            w->slots[i].file_offset <= t.offset &&
+            t.offset - w->slots[i].file_offset <= w->slots[i].bytes &&
+            t.size_bytes <= w->slots[i].bytes -
+                            (t.offset - w->slots[i].file_offset))
             return &w->slots[i];
     return NULL;
 }
@@ -122,11 +292,20 @@ static fox_status stream_into_slot(fox_weights *w, size_t tensor_index,
     fox_gguf_tensor t;
     fox_slot *s;
     fox_status st;
+    uint64_t span_offset;
+    uint64_t span_bytes;
 
     st = fox_gguf_tensor_at(w->model, tensor_index, &t);
     if (st != FOX_OK) return st;
 
-    st = make_room(w, t.size_bytes);
+    span_offset = t.offset;
+    span_bytes = t.size_bytes;
+    if (w->pack_spans) {
+        span_offset = w->pack_spans[tensor_index].offset;
+        span_bytes = w->pack_spans[tensor_index].bytes;
+    }
+
+    st = make_room(w, span_bytes);
     if (st != FOX_OK) return st;
 
     s = slot_empty(w);
@@ -139,23 +318,24 @@ static fox_status stream_into_slot(fox_weights *w, size_t tensor_index,
         w->evictions++;
     }
 
-    s->buf = (uint8_t *)fox_aligned_alloc(4096, (size_t)t.size_bytes);
+    s->buf = (uint8_t *)fox_aligned_alloc(4096, (size_t)span_bytes);
     if (!s->buf)
         return fox_fail(FOX_ERR_NOMEM, "weights: cannot allocate %llu bytes",
-                        (unsigned long long)t.size_bytes);
+                        (unsigned long long)span_bytes);
 
-    st = read_tensor_into(w, &t, s->buf);
+    st = read_range_into(w, span_offset, span_bytes, s->buf, t.name);
     if (st != FOX_OK) {
         fox_aligned_free(s->buf);
         s->buf = NULL;
         return st;
     }
 
-    s->bytes        = t.size_bytes;
+    s->bytes        = span_bytes;
+    s->file_offset  = span_offset;
     s->tensor_index = tensor_index;
     s->pins         = 0;
     s->last_used    = ++w->clock;
-    w->held_bytes  += t.size_bytes;
+    w->held_bytes  += span_bytes;
 
     *out = s;
     return FOX_OK;

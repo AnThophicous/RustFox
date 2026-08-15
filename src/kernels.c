@@ -4,6 +4,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(FOX_ARCH_X86) && \
+    (defined(__SSE2__) || defined(_M_X64) || \
+     (defined(_M_IX86_FP) && _M_IX86_FP >= 2))
+#  include <emmintrin.h>
+#  define FOX_KERNEL_SSE2 1
+#endif
+
 float fox_f16_to_f32(uint16_t h)
 {
     uint32_t sign = (uint32_t)(h >> 15);
@@ -366,6 +373,173 @@ static float dot_q6_k(const uint8_t *w, const float *x, size_t n)
     return sum;
 }
 
+#if defined(FOX_KERNEL_SSE2)
+
+static __m128i kernel_sign_extend_low_i8(__m128i values)
+{
+    __m128i zero = _mm_setzero_si128();
+    return _mm_unpacklo_epi8(values, _mm_cmpgt_epi8(zero, values));
+}
+
+static __m128i kernel_sign_extend_high_i8(__m128i values)
+{
+    __m128i zero = _mm_setzero_si128();
+    return _mm_unpackhi_epi8(values, _mm_cmpgt_epi8(zero, values));
+}
+
+static int32_t kernel_dot_i8_vectors(__m128i a, __m128i b)
+{
+    __m128i ones = _mm_set1_epi16(1);
+    __m128i low = _mm_mullo_epi16(kernel_sign_extend_low_i8(a),
+                                  kernel_sign_extend_low_i8(b));
+    __m128i high = _mm_mullo_epi16(kernel_sign_extend_high_i8(a),
+                                   kernel_sign_extend_high_i8(b));
+    __m128i acc = _mm_add_epi32(_mm_madd_epi16(low, ones),
+                                _mm_madd_epi16(high, ones));
+
+    acc = _mm_add_epi32(acc, _mm_srli_si128(acc, 8));
+    acc = _mm_add_epi32(acc, _mm_srli_si128(acc, 4));
+    return _mm_cvtsi128_si32(acc);
+}
+
+static int32_t kernel_sum_i8(const int8_t *x)
+{
+    return kernel_dot_i8_vectors(_mm_set1_epi8(1),
+                                 _mm_loadu_si128((const __m128i *)x));
+}
+
+static int32_t kernel_dot_u4_i8(const uint8_t *a, const int8_t *b, int high_nibble)
+{
+    __m128i zero = _mm_setzero_si128();
+    __m128i mask = _mm_set1_epi8(0x0F);
+    __m128i ones = _mm_set1_epi16(1);
+    __m128i acc = _mm_setzero_si128();
+    int half;
+
+    for (half = 0; half < 2; half++) {
+        __m128i qa = _mm_loadu_si128((const __m128i *)(a + half * 16));
+        __m128i xb = _mm_loadu_si128((const __m128i *)(b + half * 16));
+        __m128i q = high_nibble
+                  ? _mm_and_si128(_mm_srli_epi16(qa, 4), mask)
+                  : _mm_and_si128(qa, mask);
+        __m128i qlo = _mm_unpacklo_epi8(q, zero);
+        __m128i qhi = _mm_unpackhi_epi8(q, zero);
+        __m128i xlo = kernel_sign_extend_low_i8(xb);
+        __m128i xhi = kernel_sign_extend_high_i8(xb);
+
+        acc = _mm_add_epi32(acc,
+                            _mm_madd_epi16(_mm_mullo_epi16(qlo, xlo), ones));
+        acc = _mm_add_epi32(acc,
+                            _mm_madd_epi16(_mm_mullo_epi16(qhi, xhi), ones));
+    }
+
+    acc = _mm_add_epi32(acc, _mm_srli_si128(acc, 8));
+    acc = _mm_add_epi32(acc, _mm_srli_si128(acc, 4));
+    return _mm_cvtsi128_si32(acc);
+}
+
+static int32_t kernel_q6_group_dot(const int8_t *x, const uint8_t *ql,
+                                   const uint8_t *qh, const int8_t *sc,
+                                   int sub)
+{
+    const int base = sub * 16;
+    const __m128i mask4 = _mm_set1_epi8(0x0F);
+    const __m128i mask2 = _mm_set1_epi8(0x03);
+    const __m128i thirty_two = _mm_set1_epi8(32);
+    __m128i low = _mm_loadu_si128((const __m128i *)(ql + base));
+    __m128i high = _mm_loadu_si128((const __m128i *)(ql + base + 32));
+    __m128i bits = _mm_loadu_si128((const __m128i *)(qh + base));
+    __m128i q0, q1, q2, q3;
+    int32_t sum = 0;
+
+    q0 = _mm_or_si128(_mm_and_si128(low, mask4),
+                      _mm_slli_epi16(_mm_and_si128(bits, mask2), 4));
+    q1 = _mm_or_si128(_mm_and_si128(high, mask4),
+                      _mm_slli_epi16(_mm_and_si128(_mm_srli_epi16(bits, 2), mask2), 4));
+    q2 = _mm_or_si128(_mm_and_si128(_mm_srli_epi16(low, 4), mask4),
+                      _mm_slli_epi16(_mm_and_si128(_mm_srli_epi16(bits, 4), mask2), 4));
+    q3 = _mm_or_si128(_mm_and_si128(_mm_srli_epi16(high, 4), mask4),
+                      _mm_slli_epi16(_mm_and_si128(_mm_srli_epi16(bits, 6), mask2), 4));
+
+    q0 = _mm_sub_epi8(q0, thirty_two);
+    q1 = _mm_sub_epi8(q1, thirty_two);
+    q2 = _mm_sub_epi8(q2, thirty_two);
+    q3 = _mm_sub_epi8(q3, thirty_two);
+
+    sum += (int32_t)sc[sub + 0] * kernel_dot_i8_vectors(
+        q0, _mm_loadu_si128((const __m128i *)(x + base)));
+    sum += (int32_t)sc[sub + 2] * kernel_dot_i8_vectors(
+        q1, _mm_loadu_si128((const __m128i *)(x + base + 32)));
+    sum += (int32_t)sc[sub + 4] * kernel_dot_i8_vectors(
+        q2, _mm_loadu_si128((const __m128i *)(x + base + 64)));
+    sum += (int32_t)sc[sub + 6] * kernel_dot_i8_vectors(
+        q3, _mm_loadu_si128((const __m128i *)(x + base + 96)));
+
+    return sum;
+}
+
+static float dot_q4_k_i8(const uint8_t *w, const int8_t *x,
+                         size_t n, float act_scale)
+{
+    float sum = 0.0f;
+    size_t b, blocks = n / 256;
+
+    for (b = 0; b < blocks; b++) {
+        const uint8_t *blk = w + b * 144;
+        float d = fox_f16_to_f32(load_half(blk));
+        float dmin = fox_f16_to_f32(load_half(blk + 2));
+        const uint8_t *scales = blk + 4;
+        const int8_t *xb = x + b * 256;
+        int p;
+
+        for (p = 0; p < 4; p++) {
+            const uint8_t *q = blk + 16 + (size_t)p * 32;
+            const int8_t *xlo = xb + (size_t)p * 64;
+            const int8_t *xhi = xlo + 32;
+            uint8_t sc, m;
+
+            scale_min_k4(p * 2 + 0, scales, &sc, &m);
+            sum += act_scale * (d * (float)sc *
+                                (float)kernel_dot_u4_i8(q, xlo, 0) -
+                                dmin * (float)m * (float)kernel_sum_i8(xlo));
+            scale_min_k4(p * 2 + 1, scales, &sc, &m);
+            sum += act_scale * (d * (float)sc *
+                                (float)kernel_dot_u4_i8(q, xhi, 1) -
+                                dmin * (float)m * (float)kernel_sum_i8(xhi));
+        }
+    }
+    return sum;
+}
+
+static float dot_q6_k_i8(const uint8_t *w, const int8_t *x,
+                         size_t n, float act_scale)
+{
+    float sum = 0.0f;
+    size_t b, blocks = n / 256;
+
+    for (b = 0; b < blocks; b++) {
+        const uint8_t *blk = w + b * 210;
+        float d = fox_f16_to_f32(load_half(blk + 208));
+        const int8_t *xb = x + b * 256;
+        int half;
+
+        for (half = 0; half < 2; half++) {
+            const uint8_t *ql = blk + (size_t)half * 64;
+            const uint8_t *qh = blk + 128 + (size_t)half * 32;
+            const int8_t *sc = (const int8_t *)(blk + 192) + (size_t)half * 8;
+            int sub;
+
+            for (sub = 0; sub < 2; sub++)
+                sum += act_scale * d *
+                       (float)kernel_q6_group_dot(xb + (size_t)half * 128,
+                                                  ql, qh, sc, sub);
+        }
+    }
+    return sum;
+}
+
+#endif
+
 typedef float (*dot_fn)(const uint8_t *w, const float *x, size_t n);
 
 static dot_fn dot_for(fox_ggml_type type)
@@ -420,6 +594,60 @@ static void kernel_rows(void *vjob, int worker, size_t begin, size_t end)
                                job->x, job->n_cols);
 }
 
+#if defined(FOX_KERNEL_SSE2)
+
+typedef float (*dot_i8_fn)(const uint8_t *w, const int8_t *x,
+                           size_t n, float act_scale);
+
+typedef struct {
+    dot_i8_fn      dot;
+    const uint8_t *weights;
+    const int8_t   *x;
+    float          act_scale;
+    float          *out;
+    size_t         n_cols;
+    size_t         row_bytes;
+} kernel_i8_job;
+
+static void kernel_i8_rows(void *vjob, int worker, size_t begin, size_t end)
+{
+    kernel_i8_job *job = (kernel_i8_job *)vjob;
+    size_t r;
+
+    (void)worker;
+    for (r = begin; r < end; r++)
+        job->out[r] = job->dot(job->weights + r * job->row_bytes,
+                               job->x, job->n_cols, job->act_scale);
+}
+
+static fox_status gemv_qk_i8(fox_threadpool *tp, fox_ggml_type type,
+                             const int8_t *x, float act_scale,
+                             const void *weights, size_t n_rows,
+                             size_t n_cols, float *out)
+{
+    kernel_i8_job job;
+
+    if (!x || !weights || !out || n_rows == 0 || n_cols == 0)
+        return FOX_ERR_ARG;
+    if (n_cols % 256 != 0)
+        return fox_fail(FOX_ERR_ARG,
+                        "gemv: %llu columns is not a whole %s block",
+                        (unsigned long long)n_cols, fox_ggml_type_name(type));
+
+    job.dot = type == FOX_GGML_Q4_K ? dot_q4_k_i8 : dot_q6_k_i8;
+    job.weights = (const uint8_t *)weights;
+    job.x = x;
+    job.act_scale = act_scale;
+    job.out = out;
+    job.n_cols = n_cols;
+    job.row_bytes = fox_row_bytes(type, n_cols);
+    if (job.row_bytes == 0) return FOX_ERR_ARG;
+
+    return fox_parallel_for(tp, n_rows, kernel_i8_rows, &job);
+}
+
+#endif
+
 fox_status fox_gemv(fox_threadpool *tp, fox_ggml_type type, const float *x,
                     const void *weights, size_t n_rows, size_t n_cols,
                     float *out)
@@ -429,6 +657,28 @@ fox_status fox_gemv(fox_threadpool *tp, fox_ggml_type type, const float *x,
 
     if (!x || !weights || !out) return FOX_ERR_ARG;
     if (n_rows == 0 || n_cols == 0) return FOX_ERR_ARG;
+
+#if defined(FOX_KERNEL_SSE2)
+    if (type == FOX_GGML_Q4_K || type == FOX_GGML_Q6_K) {
+        int8_t *qx;
+        float act_scale = 0.0f;
+        fox_status st;
+
+        if (fox_row_bytes(type, n_cols) == 0)
+            return fox_fail(FOX_ERR_ARG,
+                            "gemv: %llu columns is not a whole number of %s blocks",
+                            (unsigned long long)n_cols, fox_ggml_type_name(type));
+
+        qx = (int8_t *)malloc(n_cols);
+        if (!qx) return fox_fail(FOX_ERR_NOMEM, "gemv: activation buffer");
+        st = fox_quantize_activations_i8(x, n_cols, qx, &act_scale);
+        if (st == FOX_OK)
+            st = gemv_qk_i8(tp, type, qx, act_scale, weights,
+                            n_rows, n_cols, out);
+        free(qx);
+        return st;
+    }
+#endif
 
     if (type == FOX_GGML_TQ1_0)
         return fox_gemv_tq1_f32(tp, x, weights, n_rows, n_cols, out);

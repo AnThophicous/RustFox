@@ -9,6 +9,10 @@
 #if defined(FOX_ARCH_X86)
 #  include <tmmintrin.h>
 #  define FOX_TERNARY_X86 1
+#  if defined(__SSE2__) || defined(_M_X64) || \
+      (defined(_M_IX86_FP) && _M_IX86_FP >= 2)
+#    define FOX_TERNARY_SSE2 1
+#  endif
 #endif
 
 #define TQ_BLOCK        256
@@ -88,6 +92,88 @@ static int32_t tq1_block_scalar(const int8_t *x, const uint8_t *block)
     return sum;
 }
 
+#if defined(FOX_TERNARY_SSE2)
+
+static __m128i tq1_weight_lanes(__m128i codes, int level)
+{
+    __m128i low_byte = _mm_set1_epi16(0x00FF);
+    __m128i three    = _mm_set1_epi16(3);
+    __m128i one      = _mm_set1_epi16(1);
+    __m128i scale    = _mm_set1_epi16((short)tq_pow3[level]);
+    __m128i lo       = _mm_unpacklo_epi8(codes, _mm_setzero_si128());
+    __m128i hi       = _mm_unpackhi_epi8(codes, _mm_setzero_si128());
+
+    lo = _mm_and_si128(_mm_mullo_epi16(lo, scale), low_byte);
+    hi = _mm_and_si128(_mm_mullo_epi16(hi, scale), low_byte);
+    lo = _mm_sub_epi16(_mm_srli_epi16(_mm_mullo_epi16(lo, three), 8), one);
+    hi = _mm_sub_epi16(_mm_srli_epi16(_mm_mullo_epi16(hi, three), 8), one);
+
+    return _mm_packs_epi16(lo, hi);
+}
+
+static __m128i tq1_sign_extend_low_i8(__m128i values)
+{
+    __m128i zero = _mm_setzero_si128();
+    __m128i sign = _mm_cmpgt_epi8(zero, values);
+    return _mm_unpacklo_epi8(values, sign);
+}
+
+static __m128i tq1_sign_extend_high_i8(__m128i values)
+{
+    __m128i zero = _mm_setzero_si128();
+    __m128i sign = _mm_cmpgt_epi8(zero, values);
+    return _mm_unpackhi_epi8(values, sign);
+}
+
+static int32_t tq1_reduce_codes_sse2(const int8_t *x, const uint8_t *codes,
+                                     size_t count, int levels)
+{
+    __m128i acc = _mm_setzero_si128();
+    __m128i ones = _mm_set1_epi16(1);
+    int level;
+    size_t v;
+
+    for (level = 0; level < levels; level++) {
+        for (v = 0; v < count; v += 16) {
+            __m128i packed = _mm_loadu_si128((const __m128i *)(codes + v));
+            __m128i weights = tq1_weight_lanes(packed, level);
+            __m128i activations = _mm_loadu_si128(
+                (const __m128i *)(x + (size_t)level * count + v));
+            __m128i product_lo = _mm_mullo_epi16(
+                tq1_sign_extend_low_i8(weights),
+                tq1_sign_extend_low_i8(activations));
+            __m128i product_hi = _mm_mullo_epi16(
+                tq1_sign_extend_high_i8(weights),
+                tq1_sign_extend_high_i8(activations));
+            acc = _mm_add_epi32(acc, _mm_madd_epi16(product_lo, ones));
+            acc = _mm_add_epi32(acc, _mm_madd_epi16(product_hi, ones));
+        }
+    }
+
+    acc = _mm_add_epi32(acc, _mm_srli_si128(acc, 8));
+    acc = _mm_add_epi32(acc, _mm_srli_si128(acc, 4));
+    return _mm_cvtsi128_si32(acc);
+}
+
+static int32_t tq1_block_sse2(const int8_t *x, const uint8_t *block)
+{
+    const uint8_t *qs = block;
+    const uint8_t *qh = block + TQ1_0_QS_BYTES;
+    int32_t sum;
+    size_t l, m;
+
+    sum = tq1_reduce_codes_sse2(x, qs, 32, 5);
+    sum += tq1_reduce_codes_sse2(x + 160, qs + 32, 16, 5);
+
+    for (l = 0; l < 4; l++)
+        for (m = 0; m < 4; m++)
+            sum += tq1_weight(qh[m], l) * x[240 + l * 4 + m];
+
+    return sum;
+}
+
+#endif
+
 static int32_t tq2_block_scalar(const int8_t *x, const uint8_t *qs)
 {
     int32_t sum = 0;
@@ -140,7 +226,23 @@ fox_status fox_tq2_dot_i8_scalar(const int8_t *activations, const void *block_da
 fox_status fox_tq1_dot_i8(const int8_t *activations, const void *block_data,
                           size_t n, float *out)
 {
-    return fox_tq1_dot_i8_scalar(activations, block_data, n, out);
+    const uint8_t *blocks = (const uint8_t *)block_data;
+    fox_status st = check_args(activations, block_data, n, out);
+    size_t base;
+
+    if (st != FOX_OK) return st;
+
+    *out = 0.0f;
+    for (base = 0; base < n; base += TQ_BLOCK) {
+        const uint8_t *block = blocks + (base / TQ_BLOCK) * TQ1_0_BYTES;
+#if defined(FOX_TERNARY_SSE2)
+        int32_t sum = tq1_block_sse2(activations + base, block);
+#else
+        int32_t sum = tq1_block_scalar(activations + base, block);
+#endif
+        *out += block_scale(block, TQ1_0_BYTES - 2) * (float)sum;
+    }
+    return FOX_OK;
 }
 
 #if defined(FOX_TERNARY_X86)

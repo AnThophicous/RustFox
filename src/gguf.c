@@ -212,6 +212,7 @@ static void dispose(fox_gguf *g)
         for (i = 0; i < g->n_tensors; i++) free((char *)g->tensors[i].name);
         free(g->tensors);
     }
+    free(g->tensor_offset_pos);
     free(g->path);
     free(g);
 }
@@ -296,7 +297,12 @@ static fox_status read_tensors(reader *r, fox_gguf *g)
             t->ne[j] = d;
         }
 
-        if (!u32(r, &type) || !u64(r, &offset))
+        if (!u32(r, &type))
+            return fox_fail(FOX_ERR_FORMAT,
+                            "gguf: truncated descriptor for tensor '%s'", t->name);
+
+        g->tensor_offset_pos[i] = r->pos;
+        if (!u64(r, &offset))
             return fox_fail(FOX_ERR_FORMAT,
                             "gguf: truncated descriptor for tensor '%s'", t->name);
 
@@ -412,6 +418,12 @@ fox_status fox_gguf_open(const char *path, fox_gguf **out)
         g->tensors = (fox_gguf_tensor *)calloc(g->n_tensors, sizeof(*g->tensors));
         if (!g->tensors) {
             rc = fox_fail(FOX_ERR_NOMEM, "gguf: tensor table allocation failed");
+            goto fail;
+        }
+        g->tensor_offset_pos = (uint64_t *)calloc(g->n_tensors,
+                                                  sizeof(*g->tensor_offset_pos));
+        if (!g->tensor_offset_pos) {
+            rc = fox_fail(FOX_ERR_NOMEM, "gguf: tensor offset table allocation failed");
             goto fail;
         }
     }

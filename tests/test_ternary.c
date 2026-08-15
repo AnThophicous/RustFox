@@ -144,8 +144,10 @@ int main(void)
     }
 
     want = tq1_reference(x, tq1, N);
-    CHECK(fox_tq1_dot_i8(x, tq1, N, &a) == FOX_OK && a == want,
-          "TQ1_0 matches an independent reference on pseudorandom data");
+    CHECK(fox_tq1_dot_i8_scalar(x, tq1, N, &b) == FOX_OK && b == want,
+          "TQ1_0 scalar matches an independent reference on pseudorandom data");
+    CHECK(fox_tq1_dot_i8(x, tq1, N, &a) == FOX_OK && a == b,
+          "TQ1_0 dispatch is bit-for-bit equal to the scalar reference path");
 
     want = tq2_reference(x, tq2, N);
     CHECK(fox_tq2_dot_i8_scalar(x, tq2, N, &a) == FOX_OK && a == want,

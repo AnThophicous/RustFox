@@ -24,6 +24,7 @@ struct fox_gguf {
     size_t n_tensors;
     fox_gguf_meta *meta;
     fox_gguf_tensor *tensors;
+    uint64_t *tensor_offset_pos;
 };
 
 #endif

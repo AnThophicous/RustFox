@@ -259,6 +259,8 @@ size_t fox_gguf_tensor_find(const fox_gguf *g, const char *name);
 fox_status fox_gguf_read_tensor(const fox_gguf *g, size_t index,
                                  void *dst, size_t capacity);
 
+fox_status fox_repack_gguf(const char *input_path, const char *output_path);
+
 #define FOX_TOKEN_INVALID UINT32_MAX
 
 typedef struct fox_tokenizer fox_tokenizer;

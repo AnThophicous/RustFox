@@ -1,6 +1,7 @@
 #include "fox/fox.h"
 #include "check.h"
 
+#include <math.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -124,8 +125,14 @@ static void ref_q4_k(const uint8_t *blk, float *out)
     }
 }
 
-static int probe_one_hot(fox_ggml_type type, const uint8_t *blk,
-                         const float *expected, size_t n)
+static int close_enough(float got, float want)
+{
+    float limit = 0.12f * (1.0f + fabsf(want));
+    return fabsf(got - want) <= limit;
+}
+
+static int probe_one_hot_tol(fox_ggml_type type, const uint8_t *blk,
+                             const float *expected, size_t n, float tol)
 {
     static float x[256];
     float got = 0.0f;
@@ -137,9 +144,20 @@ static int probe_one_hot(fox_ggml_type type, const uint8_t *blk,
         memset(x, 0, n * sizeof(float));
         x[k] = 1.0f;
         if (fox_gemv(NULL, type, x, blk, 1, n, &got) != FOX_OK) return 0;
-        if (got != expected[k]) return 0;
+        if (tol == 0.0f) {
+            if (got != expected[k]) return 0;
+        } else {
+            float slack = tol * (1.0f + fabsf(expected[k]));
+            if (fabsf(got - expected[k]) > slack) return 0;
+        }
     }
     return 1;
+}
+
+static int probe_one_hot(fox_ggml_type type, const uint8_t *blk,
+                         const float *expected, size_t n)
+{
+    return probe_one_hot_tol(type, blk, expected, n, 0.0f);
 }
 
 int main(void)
@@ -147,6 +165,7 @@ int main(void)
     uint8_t q4[18], q8[34], q5[22], q6k[210], q4k[144];
     float ref[256], deq[256];
     float x[N], w32[N];
+    float qk_x[256];
     float out_a[3], out_b[3];
     uint8_t f16row[N * 2];
     fox_threadpool *tp;
@@ -200,7 +219,7 @@ int main(void)
     for (i = 0; i < 208; i++) q6k[i] = (uint8_t)(rng_next(&seed) & 0xFF);
     put_half(q6k + 208, 0x3C00);
     ref_q6_k(q6k, ref);
-    CHECK(probe_one_hot(FOX_GGML_Q6_K, q6k, ref, 256),
+    CHECK(probe_one_hot_tol(FOX_GGML_Q6_K, q6k, ref, 256, 1e-3f),
           "Q6_K interleaves four groups of 32 across two 128-element halves, "
           "each with its own scale slot; probed at all 256 positions");
 
@@ -208,7 +227,7 @@ int main(void)
     put_half(q4k, 0x3C00);
     put_half(q4k + 2, 0x3800);
     ref_q4_k(q4k, ref);
-    CHECK(probe_one_hot(FOX_GGML_Q4_K, q4k, ref, 256),
+    CHECK(probe_one_hot_tol(FOX_GGML_Q4_K, q4k, ref, 256, 1e-3f),
           "Q4_K unpacks its 6-bit scales and mins from the 12 packed bytes and "
           "applies them to the right 32-element run; probed at all 256 positions");
 
@@ -223,6 +242,25 @@ int main(void)
     ok = 1;
     for (k = 0; k < 256; k++) if (deq[k] != ref[k]) ok = 0;
     CHECK(ok, "Q4_K dequant matches the reference element for element");
+
+    for (i = 0; i < 256; i++)
+        qk_x[i] = (float)((int)(rng_next(&seed) & 0xFF) - 128) * 0.01f;
+    ref_q6_k(q6k, ref);
+    {
+        float want = 0.0f, got = 0.0f;
+        for (i = 0; i < 256; i++) want += ref[i] * qk_x[i];
+        CHECK(fox_gemv(NULL, FOX_GGML_Q6_K, qk_x, q6k, 1, 256, &got) == FOX_OK &&
+              close_enough(got, want),
+              "Q6_K integer SIMD GEMV stays within the quantized activation error bound");
+    }
+    ref_q4_k(q4k, ref);
+    {
+        float want = 0.0f, got = 0.0f;
+        for (i = 0; i < 256; i++) want += ref[i] * qk_x[i];
+        CHECK(fox_gemv(NULL, FOX_GGML_Q4_K, qk_x, q4k, 1, 256, &got) == FOX_OK &&
+              close_enough(got, want),
+              "Q4_K integer SIMD GEMV stays within the quantized activation error bound");
+    }
 
     for (i = 0; i < N; i++) {
         x[i]   = (float)((int)(rng_next(&seed) & 0x3F) - 32) * 0.125f;
