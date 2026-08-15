@@ -18,9 +18,9 @@ VPS, an old office box someone was about to throw away.
 > budget tight enough to force eviction on every pass.
 >
 > **It generates text.** `fox run model.gguf -p "..."` works, resident or
-> streamed. What is not done yet is the performance work that makes streaming
-> cheap rather than merely correct — async prefetch, the layer-contiguous
-> repack, and vectorised TQ1_0. See [Roadmap](#roadmap) for exactly what exists.
+> streamed. The performance path now includes integer SIMD for Q4_K/Q6_K,
+> asynchronous layer-ahead prefetch, a layer-contiguous `.foxpack` repack, and
+> a vectorised TQ1_0 path. See [Roadmap](#roadmap) for what remains.
 
 ---
 
@@ -249,9 +249,9 @@ heuristic.
 | ✅ | Transformer forward pass, GQA attention, KV cache | done |
 | ✅ | Sampler — greedy, top-k, top-p, repeat penalty | done |
 | ✅ | `fox run` — text in, text out | done |
-| 🚧 | Async prefetch — overlap layer N+1 with the compute of layer N | next |
-| 🚧 | Layer-contiguous repack (`.foxpack`) for sequential streaming | planned |
-| 🚧 | Vectorised TQ1_0 | planned |
+| ✅ | Async prefetch — overlap layer N+1 with the compute of layer N | done |
+| ✅ | Layer-contiguous repack (`.foxpack`) for sequential streaming | done |
+| ✅ | Vectorised TQ1_0 | done |
 | 🚧 | `io_uring` fast path on Linux | planned |
 | 🚧 | Speculative decoding — the multiplier for streamed dense models | planned |
 | 🚧 | Vulkan backend for integrated GPUs | later |

@@ -191,7 +191,7 @@ CPU is handled the same way — `sched_getaffinity` rather than
 
 ---
 
-## 7. Placement policy (design, not yet implemented)
+## 7. Placement policy
 
 Streaming works differently for the two architectures, so placement branches on
 them rather than pretending they are the same.
@@ -208,6 +208,13 @@ streams:
   sequential read prefetched a layer ahead.
 - **`mmap`** the token embedding and let the page cache handle it. Access is
   sparse: only the rows for tokens actually seen.
+
+For dense streamed models, `fox repack input.gguf output.foxpack` rewrites the
+GGUF tensor offsets and payload order so each transformer layer occupies one
+contiguous span. The streaming cache loads that span once, and the forward pass
+requests the next layer's first norm asynchronously while computing the current
+layer. This keeps the GGUF tensor contract intact while removing the seeks and
+small independent reads that otherwise dominate a tight-budget run.
 
 **MoE.** Pin the router, shared experts, and attention; stream routed experts
 under a heat-weighted LRU. This is the shape Colibrì established and there is

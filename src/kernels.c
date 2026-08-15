@@ -404,8 +404,9 @@ static int32_t kernel_dot_i8_vectors(__m128i a, __m128i b)
 
 static int32_t kernel_sum_i8(const int8_t *x)
 {
-    return kernel_dot_i8_vectors(_mm_set1_epi8(1),
-                                 _mm_loadu_si128((const __m128i *)x));
+    __m128i ones = _mm_set1_epi8(1);
+    return kernel_dot_i8_vectors(ones, _mm_loadu_si128((const __m128i *)x)) +
+           kernel_dot_i8_vectors(ones, _mm_loadu_si128((const __m128i *)(x + 16)));
 }
 
 static int32_t kernel_dot_u4_i8(const uint8_t *a, const int8_t *b, int high_nibble)
