@@ -245,6 +245,8 @@ size_t fox_gguf_metadata_array_count(const fox_gguf *g, size_t index);
 fox_gguf_value_type fox_gguf_metadata_array_type(const fox_gguf *g, size_t index);
 fox_status fox_gguf_get_u32(const fox_gguf *g, size_t index, uint32_t *out);
 fox_status fox_gguf_get_bool(const fox_gguf *g, size_t index, int *out);
+fox_status fox_gguf_get_f32(const fox_gguf *g, size_t index, float *out);
+fox_status fox_gguf_get_uint(const fox_gguf *g, size_t index, uint64_t *out);
 fox_status fox_gguf_get_string(const fox_gguf *g, size_t index, const char **out);
 fox_status fox_gguf_get_array_string(const fox_gguf *g, size_t index,
                                      size_t element, const char **out);
@@ -395,6 +397,72 @@ size_t     fox_weights_live_leases(const fox_weights *w);
 uint64_t   fox_weights_resident_bytes(const fox_weights *w);
 uint64_t   fox_weights_reads(const fox_weights *w);
 uint64_t   fox_weights_evictions(const fox_weights *w);
+
+typedef struct {
+    char     arch[32];
+    char     name[FOX_NAME_MAX];
+    uint32_t n_layer;
+    uint32_t n_embd;
+    uint32_t n_head;
+    uint32_t n_head_kv;
+    uint32_t n_ff;
+    uint32_t head_dim;
+    uint32_t n_vocab;
+    uint32_t n_ctx_train;
+    float    rms_eps;
+    float    rope_freq_base;
+    uint64_t weight_bytes;
+    int      tied_output;
+} fox_model_info;
+
+typedef struct fox_model   fox_model;
+typedef struct fox_context fox_context;
+
+fox_status fox_model_open(const char *gguf_path, fox_weights_mode mode,
+                          uint64_t budget_bytes, fox_model **out);
+void       fox_model_close(fox_model *m);
+
+const fox_model_info *fox_model_get_info(const fox_model *m);
+const fox_tokenizer  *fox_model_tokenizer(const fox_model *m);
+fox_weights          *fox_model_weights(fox_model *m);
+
+typedef struct {
+    uint32_t n_ctx;
+    uint32_t n_batch;
+    int      n_threads;
+} fox_context_config;
+
+void fox_context_config_default(fox_context_config *cfg, const fox_model *m);
+
+fox_status fox_context_create(fox_model *m, const fox_context_config *cfg,
+                              fox_context **out);
+void       fox_context_destroy(fox_context *ctx);
+void       fox_context_reset(fox_context *ctx);
+
+fox_status fox_eval(fox_context *ctx, const uint32_t *tokens, size_t n_tokens,
+                    float **logits_out);
+
+uint32_t fox_context_position(const fox_context *ctx);
+double   fox_context_last_eval_seconds(const fox_context *ctx);
+uint64_t fox_context_weight_reads(const fox_context *ctx);
+
+typedef struct {
+    float    temperature;
+    int      top_k;
+    float    top_p;
+    float    repeat_penalty;
+    uint32_t repeat_last_n;
+    uint64_t seed;
+} fox_sampler_config;
+
+void fox_sampler_config_default(fox_sampler_config *cfg);
+
+typedef struct fox_sampler fox_sampler;
+
+fox_sampler *fox_sampler_create(const fox_sampler_config *cfg, size_t n_vocab);
+void         fox_sampler_destroy(fox_sampler *s);
+void         fox_sampler_accept(fox_sampler *s, uint32_t token);
+fox_status   fox_sampler_pick(fox_sampler *s, const float *logits, uint32_t *out);
 
 #ifdef __cplusplus
 }

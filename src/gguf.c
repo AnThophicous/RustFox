@@ -521,6 +521,48 @@ fox_status fox_gguf_get_bool(const fox_gguf *g, size_t index, int *out)
     return FOX_OK;
 }
 
+fox_status fox_gguf_get_f32(const fox_gguf *g, size_t index, float *out)
+{
+    union { uint32_t u; float f; } v;
+
+    if (!g || !out) return FOX_ERR_ARG;
+    if (index >= g->n_meta) return FOX_ERR_NOTFOUND;
+    if (g->meta[index].type != FOX_GGUF_FLOAT32) return FOX_ERR_FORMAT;
+    v.u = (uint32_t)g->meta[index].u64;
+    *out = v.f;
+    return FOX_OK;
+}
+
+fox_status fox_gguf_get_uint(const fox_gguf *g, size_t index, uint64_t *out)
+{
+    if (!g || !out) return FOX_ERR_ARG;
+    if (index >= g->n_meta) return FOX_ERR_NOTFOUND;
+
+    switch (g->meta[index].type) {
+    case FOX_GGUF_UINT8:
+    case FOX_GGUF_UINT16:
+    case FOX_GGUF_UINT32:
+    case FOX_GGUF_UINT64:
+    case FOX_GGUF_BOOL:
+        *out = g->meta[index].u64;
+        return FOX_OK;
+    case FOX_GGUF_INT8:
+        *out = (uint64_t)(int64_t)(int8_t)g->meta[index].u64;
+        return FOX_OK;
+    case FOX_GGUF_INT16:
+        *out = (uint64_t)(int64_t)(int16_t)g->meta[index].u64;
+        return FOX_OK;
+    case FOX_GGUF_INT32:
+        *out = (uint64_t)(int64_t)(int32_t)g->meta[index].u64;
+        return FOX_OK;
+    case FOX_GGUF_INT64:
+        *out = g->meta[index].u64;
+        return FOX_OK;
+    default:
+        return FOX_ERR_FORMAT;
+    }
+}
+
 fox_status fox_gguf_get_string(const fox_gguf *g, size_t index, const char **out)
 {
     if (!g || !out) return FOX_ERR_ARG;
