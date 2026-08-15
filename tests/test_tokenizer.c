@@ -27,13 +27,13 @@ static void make_model(const char *path)
 
 int main(void)
 {
-    const char *path="rustfox-tokenizer.gguf"; fox_gguf *g=NULL; fox_tokenizer *t=NULL; uint32_t ids[8]; char text[64]; size_t n=0;
+    const char *path="rustfox-tokenizer.gguf"; fox_gguf *g=NULL; fox_tokenizer *t=NULL; uint32_t ids[8]; char text[64]; size_t n=0; size_t written=0;
     make_model(path);
     CHECK(fox_gguf_open(path,&g)==FOX_OK,"realistic tokenizer GGUF opens");
     CHECK(fox_tokenizer_open(g,&t)==FOX_OK,"Llama tokenizer metadata is accepted");
     CHECK(fox_tokenizer_vocab_size(t)==8&&fox_tokenizer_bos(t)==0&&fox_tokenizer_eos(t)==1,"tokenizer IDs come from GGUF");
     CHECK(fox_tokenizer_encode(t,"Rust Fox!",ids,8,&n)==FOX_OK&&n==4&&ids[0]==0&&ids[1]==3&&ids[2]==4&&ids[3]==7,"prompt becomes model vocabulary IDs");
-    CHECK(fox_tokenizer_decode(t,ids,n,text,sizeof(text))==FOX_OK&&strcmp(text,"Rust Fox!")==0,"generated IDs decode to text");
+    CHECK(fox_tokenizer_decode(t,ids,n,text,sizeof(text),&written)==FOX_OK&&strcmp(text,"Rust Fox!")==0&&written==9,"generated IDs decode to text");
     CHECK(fox_tokenizer_encode(t,"Rust Fox!",ids,2,&n)==FOX_ERR_ARG&&n==4,"encoding reports required token capacity");
     fox_tokenizer_close(t); fox_gguf_close(g); remove(path);
     CHECK(fox_tokenizer_open(NULL,&t)==FOX_ERR_ARG,"null tokenizer model is rejected");
