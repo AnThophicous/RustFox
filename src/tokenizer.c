@@ -311,8 +311,10 @@ fox_status fox_tokenizer_decode(const fox_tokenizer *tokenizer,
                                 char *text, size_t capacity, size_t *written)
 {
     size_t i, j, length = 0;
+    int at_sequence_start;
     if (!tokenizer || (!tokens && count) || !written || (capacity && !text))
         return FOX_ERR_ARG;
+    at_sequence_start = (count > 0 && tokens[0] == tokenizer->bos);
     for (i = 0; i < count; i++) {
         const char *token;
         uint8_t byte;
@@ -328,7 +330,8 @@ fox_status fox_tokenizer_decode(const fox_tokenizer *tokenizer,
                 (unsigned char)token[j] == 0xe2 &&
                 (unsigned char)token[j + 1] == 0x96 &&
                 (unsigned char)token[j + 2] == 0x81) {
-                if (length != 0) append_char(text, capacity, &length, ' ');
+                if (length != 0 || !at_sequence_start)
+                    append_char(text, capacity, &length, ' ');
                 j += 2;
             } else {
                 append_char(text, capacity, &length, token[j]);

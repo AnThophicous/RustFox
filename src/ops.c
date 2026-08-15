@@ -53,8 +53,8 @@ void fox_add(float *dst, const float *src, size_t n)
     for (i = 0; i < n; i++) dst[i] += src[i];
 }
 
-void fox_rope(float *vec, size_t n_heads, size_t head_dim, uint32_t pos,
-              float freq_base)
+void fox_rope(float *vec, size_t n_heads, size_t head_dim,
+              const float *cos_row, const float *sin_row)
 {
     size_t h, i;
     size_t half = head_dim / 2;
@@ -62,10 +62,8 @@ void fox_rope(float *vec, size_t n_heads, size_t head_dim, uint32_t pos,
     for (h = 0; h < n_heads; h++) {
         float *v = vec + h * head_dim;
         for (i = 0; i < half; i++) {
-            float exponent = -2.0f * (float)i / (float)head_dim;
-            float theta = (float)pos * powf(freq_base, exponent);
-            float c = cosf(theta);
-            float s = sinf(theta);
+            float c = cos_row[i];
+            float s = sin_row[i];
             float x0 = v[2 * i];
             float x1 = v[2 * i + 1];
             v[2 * i]     = x0 * c - x1 * s;

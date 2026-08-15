@@ -275,29 +275,95 @@ static void dequant_block_q4k(const uint8_t *blk, float *out)
     }
 }
 
-static float dot_super(const uint8_t *w, const float *x, size_t n,
-                       size_t block_bytes,
-                       void (*expand)(const uint8_t *, float *))
+static float dot_q4_k(const uint8_t *w, const float *x, size_t n)
 {
-    float block[256];
     float sum = 0.0f;
-    size_t b, i, blocks = n / 256;
+    size_t b, blocks = n / 256;
 
     for (b = 0; b < blocks; b++) {
-        expand(w + b * block_bytes, block);
-        for (i = 0; i < 256; i++) sum += block[i] * x[b * 256 + i];
+        const uint8_t *blk = w + b * 144;
+        float d    = fox_f16_to_f32(load_half(blk));
+        float dmin = fox_f16_to_f32(load_half(blk + 2));
+        const uint8_t *scales = blk + 4;
+        const float *xb = x + b * 256;
+        int p;
+
+        for (p = 0; p < 4; p++) {
+            const uint8_t *q = blk + 16 + (size_t)p * 32;
+            const float *xlo = xb + (size_t)p * 64;
+            const float *xhi = xlo + 32;
+            float acc_lo = 0.0f, acc_hi = 0.0f;
+            float sum_lo = 0.0f, sum_hi = 0.0f;
+            uint8_t sc, m;
+            float d1, m1, d2, m2;
+            int l;
+
+            for (l = 0; l < 32; l++) {
+                float a = xlo[l];
+                float c = xhi[l];
+                acc_lo += (float)(q[l] & 0x0F) * a;
+                acc_hi += (float)(q[l] >> 4) * c;
+                sum_lo += a;
+                sum_hi += c;
+            }
+
+            scale_min_k4(p * 2 + 0, scales, &sc, &m);
+            d1 = d * (float)sc;
+            m1 = dmin * (float)m;
+            scale_min_k4(p * 2 + 1, scales, &sc, &m);
+            d2 = d * (float)sc;
+            m2 = dmin * (float)m;
+
+            sum += d1 * acc_lo - m1 * sum_lo;
+            sum += d2 * acc_hi - m2 * sum_hi;
+        }
     }
     return sum;
 }
 
 static float dot_q6_k(const uint8_t *w, const float *x, size_t n)
 {
-    return dot_super(w, x, n, 210, dequant_block_q6k);
-}
+    float sum = 0.0f;
+    size_t b, blocks = n / 256;
 
-static float dot_q4_k(const uint8_t *w, const float *x, size_t n)
-{
-    return dot_super(w, x, n, 144, dequant_block_q4k);
+    for (b = 0; b < blocks; b++) {
+        const uint8_t *blk = w + b * 210;
+        float d = fox_f16_to_f32(load_half(blk + 208));
+        const float *xb = x + b * 256;
+        int half;
+
+        for (half = 0; half < 2; half++) {
+            const uint8_t *ql = blk + (size_t)half * 64;
+            const uint8_t *qh = blk + 128 + (size_t)half * 32;
+            const int8_t  *sc = (const int8_t *)(blk + 192) + (size_t)half * 8;
+            const float *xh = xb + (size_t)half * 128;
+            int sub;
+
+            for (sub = 0; sub < 2; sub++) {
+                int base = sub * 16;
+                float a0 = 0.0f, a1 = 0.0f, a2 = 0.0f, a3 = 0.0f;
+                int l;
+
+                for (l = base; l < base + 16; l++) {
+                    int q0 = (int)((ql[l]      & 0x0F) | (((qh[l] >> 0) & 3) << 4)) - 32;
+                    int q1 = (int)((ql[l + 32] & 0x0F) | (((qh[l] >> 2) & 3) << 4)) - 32;
+                    int q2 = (int)((ql[l]      >> 4)   | (((qh[l] >> 4) & 3) << 4)) - 32;
+                    int q3 = (int)((ql[l + 32] >> 4)   | (((qh[l] >> 6) & 3) << 4)) - 32;
+
+                    a0 += (float)q0 * xh[l];
+                    a1 += (float)q1 * xh[l + 32];
+                    a2 += (float)q2 * xh[l + 64];
+                    a3 += (float)q3 * xh[l + 96];
+                }
+
+                sum += d * (float)sc[sub + 0] * a0;
+                sum += d * (float)sc[sub + 2] * a1;
+                sum += d * (float)sc[sub + 4] * a2;
+                sum += d * (float)sc[sub + 6] * a3;
+            }
+        }
+    }
+    return sum;
 }
 
 typedef float (*dot_fn)(const uint8_t *w, const float *x, size_t n);

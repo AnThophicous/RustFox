@@ -31,6 +31,8 @@ struct fox_context {
     float              *att;
     float              *norm;
     float              *logits;
+    float              *rope_cos;
+    float              *rope_sin;
 
     double              last_seconds;
     uint64_t            reads_at_start;
@@ -99,10 +101,26 @@ fox_status fox_context_create(fox_model *m, const fox_context_config *cfg,
     ctx->att    = (float *)alloc_f32((size_t)fox_threadpool_size(ctx->pool) * c.n_ctx);
     ctx->norm   = (float *)alloc_f32(ctx->wide);
     ctx->logits = (float *)alloc_f32(mi->n_vocab);
+    ctx->rope_cos = (float *)alloc_f32((size_t)c.n_ctx * (mi->head_dim / 2));
+    ctx->rope_sin = (float *)alloc_f32((size_t)c.n_ctx * (mi->head_dim / 2));
+
+    if (ctx->rope_cos && ctx->rope_sin) {
+        size_t half = mi->head_dim / 2;
+        size_t p, i;
+        for (p = 0; p < c.n_ctx; p++) {
+            for (i = 0; i < half; i++) {
+                double exponent = -2.0 * (double)i / (double)mi->head_dim;
+                double theta = (double)p * pow((double)mi->rope_freq_base, exponent);
+                ctx->rope_cos[p * half + i] = (float)cos(theta);
+                ctx->rope_sin[p * half + i] = (float)sin(theta);
+            }
+        }
+    }
 
     if (!ctx->kcache || !ctx->vcache || !ctx->x || !ctx->xb || !ctx->xb2 ||
         !ctx->q || !ctx->kbuf || !ctx->vbuf || !ctx->hb || !ctx->hb2 ||
-        !ctx->att || !ctx->norm || !ctx->logits) {
+        !ctx->att || !ctx->norm || !ctx->logits ||
+        !ctx->rope_cos || !ctx->rope_sin) {
         fox_context_destroy(ctx);
         return fox_fail(FOX_ERR_NOMEM,
                         "context: cannot allocate working memory for %u context "
@@ -121,6 +139,7 @@ void fox_context_destroy(fox_context *ctx)
     free(ctx->q); free(ctx->kbuf); free(ctx->vbuf);
     free(ctx->hb); free(ctx->hb2);
     free(ctx->att); free(ctx->norm); free(ctx->logits);
+    free(ctx->rope_cos); free(ctx->rope_sin);
     if (ctx->pool) fox_threadpool_destroy(ctx->pool);
     free(ctx);
 }
@@ -317,10 +336,12 @@ static fox_status forward_batch(fox_context *ctx, const uint32_t *tokens,
             float *kdst = ctx->kcache + layer_base + (size_t)p * ctx->n_kv_embd;
             float *vdst = ctx->vcache + layer_base + (size_t)p * ctx->n_kv_embd;
 
-            fox_rope(ctx->q + i * ctx->n_q_embd, mi->n_head, mi->head_dim, p,
-                     mi->rope_freq_base);
-            fox_rope(ctx->kbuf + i * ctx->n_kv_embd, mi->n_head_kv, mi->head_dim, p,
-                     mi->rope_freq_base);
+            const float *rc = ctx->rope_cos + (size_t)p * (mi->head_dim / 2);
+            const float *rs = ctx->rope_sin + (size_t)p * (mi->head_dim / 2);
+
+            fox_rope(ctx->q + i * ctx->n_q_embd, mi->n_head, mi->head_dim, rc, rs);
+            fox_rope(ctx->kbuf + i * ctx->n_kv_embd, mi->n_head_kv, mi->head_dim,
+                     rc, rs);
 
             memcpy(kdst, ctx->kbuf + i * ctx->n_kv_embd,
                    ctx->n_kv_embd * sizeof(float));

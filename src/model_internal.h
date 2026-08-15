@@ -35,8 +35,8 @@ void  fox_rmsnorm(float *out, const float *x, const float *weight,
 void  fox_softmax(float *x, size_t n);
 void  fox_silu_mul(float *gate, const float *up, size_t n);
 void  fox_add(float *dst, const float *src, size_t n);
-void  fox_rope(float *vec, size_t n_heads, size_t head_dim, uint32_t pos,
-               float freq_base);
+void  fox_rope(float *vec, size_t n_heads, size_t head_dim,
+               const float *cos_row, const float *sin_row);
 float fox_dot_f32(const float *a, const float *b, size_t n);
 
 #endif

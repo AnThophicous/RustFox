@@ -93,7 +93,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: configure
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DFOX_WERROR=ON -DFOX_STATIC=ON
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DFOX_WERROR=ON \
+                -DFOX_STATIC=ON -DFOX_NATIVE=OFF
 
       - name: build
         run: cmake --build build -j "$(nproc)"

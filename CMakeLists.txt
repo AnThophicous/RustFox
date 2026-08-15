@@ -5,6 +5,7 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS ON)
 
+option(FOX_NATIVE      "Tune for the building machine"   ON)
 option(FOX_WERROR      "Treat warnings as errors"        OFF)
 option(FOX_BUILD_TESTS "Build the test suite"            ON)
 option(FOX_STATIC      "Link the CLI fully statically"   OFF)
@@ -63,6 +64,17 @@ else()
         -Wall -Wextra -Wshadow -Wpointer-arith -Wvla -Wstrict-prototypes)
     if(FOX_WERROR)
         target_compile_options(foxcore PRIVATE -Werror)
+    endif()
+endif()
+
+if(FOX_NATIVE AND NOT MSVC)
+    include(CheckCCompilerFlag)
+    check_c_compiler_flag("-march=native" FOX_HAS_MARCH_NATIVE)
+    if(FOX_HAS_MARCH_NATIVE)
+        target_compile_options(foxcore PUBLIC -march=native)
+        message(STATUS "fox: tuning for this machine (-march=native). "
+                       "The binary will not be portable. Pass -DFOX_NATIVE=OFF "
+                       "to build something you can copy elsewhere.")
     endif()
 endif()
 
