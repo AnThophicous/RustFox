@@ -103,7 +103,7 @@ static int str_read(reader *r, char **out, fox_status *rc)
     char *s;
 
     if (!u64(r, &n)) return 0;
-    if (n > GGUF_MAX_STRING || n > r->size - r->pos) return 0;
+    if (n > GGUF_MAX_STRING || n > r->size - r->pos || n > SIZE_MAX - 1) return 0;
 
     s = (char *)malloc((size_t)n + 1);
     if (!s) {
@@ -160,11 +160,21 @@ static int tensor_layout(fox_ggml_type t, uint32_t *block, uint32_t *bytes)
     case FOX_GGML_Q5_0:  *block = 32;  *bytes = 22;  return 1;
     case FOX_GGML_Q5_1:  *block = 32;  *bytes = 24;  return 1;
     case FOX_GGML_Q8_0:  *block = 32;  *bytes = 34;  return 1;
+    case FOX_GGML_Q8_K:  *block = 256; *bytes = 292; return 1;
     case FOX_GGML_Q2_K:  *block = 256; *bytes = 84;  return 1;
     case FOX_GGML_Q3_K:  *block = 256; *bytes = 110; return 1;
     case FOX_GGML_Q4_K:  *block = 256; *bytes = 144; return 1;
     case FOX_GGML_Q5_K:  *block = 256; *bytes = 176; return 1;
     case FOX_GGML_Q6_K:  *block = 256; *bytes = 210; return 1;
+    case FOX_GGML_IQ2_XXS: *block = 256; *bytes = 66;  return 1;
+    case FOX_GGML_IQ2_XS:  *block = 256; *bytes = 74;  return 1;
+    case FOX_GGML_IQ3_XXS: *block = 256; *bytes = 98;  return 1;
+    case FOX_GGML_IQ1_S:   *block = 256; *bytes = 50;  return 1;
+    case FOX_GGML_IQ4_NL:  *block = 32;  *bytes = 18;  return 1;
+    case FOX_GGML_IQ3_S:   *block = 256; *bytes = 110; return 1;
+    case FOX_GGML_IQ2_S:   *block = 256; *bytes = 82;  return 1;
+    case FOX_GGML_IQ4_XS:  *block = 256; *bytes = 136; return 1;
+    case FOX_GGML_IQ1_M:   *block = 256; *bytes = 56;  return 1;
     case FOX_GGML_TQ1_0: *block = 256; *bytes = 54;  return 1;
     case FOX_GGML_TQ2_0: *block = 256; *bytes = 66;  return 1;
     default: return 0;
@@ -250,6 +260,12 @@ static fox_status read_tensors(reader *r, fox_gguf *g)
         if (!str_read(r, (char **)&t->name, &rc))
             return fox_fail(rc, "gguf: bad tensor name at index %llu",
                             (unsigned long long)i);
+
+        for (j = 0; j < i; j++) {
+            if (strcmp(t->name, g->tensors[j].name) == 0)
+                return fox_fail(FOX_ERR_FORMAT,
+                                "gguf: duplicate tensor name '%s'", t->name);
+        }
 
         if (!u32(r, &dims) || dims == 0 || dims > FOX_GGUF_MAX_DIMS)
             return fox_fail(FOX_ERR_FORMAT,
@@ -506,11 +522,21 @@ const char *fox_ggml_type_name(fox_ggml_type type)
     case FOX_GGML_Q5_0:  return "Q5_0";
     case FOX_GGML_Q5_1:  return "Q5_1";
     case FOX_GGML_Q8_0:  return "Q8_0";
+    case FOX_GGML_Q8_K:  return "Q8_K";
     case FOX_GGML_Q2_K:  return "Q2_K";
     case FOX_GGML_Q3_K:  return "Q3_K";
     case FOX_GGML_Q4_K:  return "Q4_K";
     case FOX_GGML_Q5_K:  return "Q5_K";
     case FOX_GGML_Q6_K:  return "Q6_K";
+    case FOX_GGML_IQ2_XXS: return "IQ2_XXS";
+    case FOX_GGML_IQ2_XS:  return "IQ2_XS";
+    case FOX_GGML_IQ3_XXS: return "IQ3_XXS";
+    case FOX_GGML_IQ1_S:   return "IQ1_S";
+    case FOX_GGML_IQ4_NL:  return "IQ4_NL";
+    case FOX_GGML_IQ3_S:   return "IQ3_S";
+    case FOX_GGML_IQ2_S:   return "IQ2_S";
+    case FOX_GGML_IQ4_XS:  return "IQ4_XS";
+    case FOX_GGML_IQ1_M:   return "IQ1_M";
     case FOX_GGML_Q8_K:  return "Q8_K";
     case FOX_GGML_TQ1_0: return "TQ1_0";
     case FOX_GGML_TQ2_0: return "TQ2_0";

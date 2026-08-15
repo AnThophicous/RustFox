@@ -129,6 +129,10 @@ int main(void)
           fox_ggml_type_block_bytes(FOX_GGML_Q4_K) == 144 &&
           fox_ggml_type_block_bytes(FOX_GGML_Q6_K) == 210,
           "the above-1-bit block layouts match ggml");
+    CHECK(fox_ggml_type_block_bytes(FOX_GGML_Q8_K) == 292 &&
+          fox_ggml_type_block_bytes(FOX_GGML_IQ2_XXS) == 66 &&
+          fox_ggml_type_block_bytes(FOX_GGML_IQ4_XS) == 136,
+          "IQ and Q8_K block layouts are available to the planner");
 
     CHECK_DONE();
 }

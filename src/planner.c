@@ -131,9 +131,16 @@ fox_status fox_plan_build(const fox_gguf *model, const fox_plan_config *config,
     if (cfg.seq_read_mbps > 0.0)
         plan->summary.io_seconds = (double)plan->summary.streamed_bytes /
             (cfg.seq_read_mbps * 1024.0 * 1024.0);
-    token_seconds = plan->summary.compute_seconds > plan->summary.io_seconds ?
-        plan->summary.compute_seconds : plan->summary.io_seconds;
-    plan->summary.predicted_tok_s = token_seconds > 0.0 ? 1.0 / token_seconds : 0.0;
+    else
+        plan->summary.io_seconds = 0.0;
+
+    if (plan->summary.streamed_bytes > 0 && cfg.seq_read_mbps <= 0.0) {
+        plan->summary.predicted_tok_s = 0.0;
+    } else {
+        token_seconds = plan->summary.compute_seconds > plan->summary.io_seconds ?
+            plan->summary.compute_seconds : plan->summary.io_seconds;
+        plan->summary.predicted_tok_s = token_seconds > 0.0 ? 1.0 / token_seconds : 0.0;
+    }
     *out = plan;
     return FOX_OK;
 }
