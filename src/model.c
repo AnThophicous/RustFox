@@ -98,6 +98,51 @@ static fox_status check_kernels(const fox_model *m, const fox_gguf *g)
     return FOX_OK;
 }
 
+static void warn_unconsumed(const fox_model *m, const fox_gguf *g)
+{
+    size_t n = fox_gguf_tensor_count(g);
+    unsigned char *used;
+    size_t i, ignored = 0;
+    uint32_t l;
+
+    used = (unsigned char *)calloc(n ? n : 1, 1);
+    if (!used) return;
+
+    if (m->token_embd < n)  used[m->token_embd] = 1;
+    if (m->output_norm < n) used[m->output_norm] = 1;
+    if (m->output < n)      used[m->output] = 1;
+
+    for (l = 0; l < m->info.n_layer; l++) {
+        const fox_layer_tensors *t = &m->layers[l];
+        const size_t ids[9] = { t->attn_norm, t->attn_q, t->attn_k, t->attn_v,
+                                t->attn_out, t->ffn_norm, t->ffn_gate,
+                                t->ffn_up, t->ffn_down };
+        for (i = 0; i < 9; i++) if (ids[i] < n) used[ids[i]] = 1;
+    }
+
+    for (i = 0; i < n; i++) {
+        fox_gguf_tensor t;
+        if (used[i]) continue;
+        if (fox_gguf_tensor_at(g, i, &t) != FOX_OK) continue;
+        if (ignored == 0)
+            FOX_WARN("model: this GGUF carries tensors the forward pass does "
+                     "not apply. Output will be wrong, not merely different:");
+        if (ignored < 12) FOX_WARN("model:   unused '%s'", t.name);
+        ignored++;
+    }
+
+    if (ignored >= 12)
+        FOX_WARN("model:   ...and %llu more",
+                 (unsigned long long)(ignored - 12));
+    if (ignored > 0)
+        FOX_WARN("model: %llu unused tensors. Attention biases, sub-layer "
+                 "norms and expert routers all look like this. Refusing would "
+                 "be safer, but you asked to run it.",
+                 (unsigned long long)ignored);
+
+    free(used);
+}
+
 fox_status fox_model_open(const char *gguf_path, fox_weights_mode mode,
                           uint64_t budget_bytes, fox_model **out)
 {
@@ -226,6 +271,15 @@ fox_status fox_model_open(const char *gguf_path, fox_weights_mode mode,
 
     st = resolve_layers(m, g);
     if (st != FOX_OK) goto fail;
+
+    if (strcmp(m->info.arch, "llama") != 0)
+        FOX_WARN("model: architecture is '%s'. The forward pass implements the "
+                 "llama shape: rmsnorm, rotary embeddings on adjacent pairs, "
+                 "grouped query attention and a SwiGLU feed forward. Anything "
+                 "else in this architecture is silently not happening.",
+                 m->info.arch);
+
+    warn_unconsumed(m, g);
 
     n_tensors = fox_gguf_tensor_count(g);
     for (i = 0; i < n_tensors; i++) {

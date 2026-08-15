@@ -1,0 +1,19 @@
+{
+  "name": "RustFox",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu-24.04",
+  "hostRequirements": {
+    "cpus": 2,
+    "memory": "8gb",
+    "storage": "32gb"
+  },
+  "onCreateCommand": "sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential cmake curl file && sudo rm -rf /var/lib/apt/lists/*",
+  "postCreateCommand": "cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j $(nproc) && ./build/fox probe",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-vscode.cpptools",
+        "ms-vscode.cmake-tools"
+      ]
+    }
+  }
+}
