@@ -17,9 +17,10 @@ VPS, an old office box someone was about to throw away.
 > streaming returns byte-for-byte what resident returns while staying inside a
 > budget tight enough to force eviction on every pass.
 >
-> **It does not generate tokens yet.** The transformer forward pass, KV cache
-> and sampler are still being written. See [Roadmap](#roadmap) for exactly what
-> exists.
+> **It generates text.** `fox run model.gguf -p "..."` works, resident or
+> streamed. What is not done yet is the performance work that makes streaming
+> cheap rather than merely correct — async prefetch, the layer-contiguous
+> repack, and vectorised TQ1_0. See [Roadmap](#roadmap) for exactly what exists.
 
 ---
 
@@ -245,7 +246,9 @@ heuristic.
 | ✅ | Weights lease API — resident and streaming behind one contract | done |
 | ✅ | Streaming backend — LRU slots, hard budget, verified vs resident | done |
 | ✅ | Tokenizer | done |
-| 🚧 | Transformer forward pass, KV cache, sampler, `fox run` | in progress |
+| ✅ | Transformer forward pass, GQA attention, KV cache | done |
+| ✅ | Sampler — greedy, top-k, top-p, repeat penalty | done |
+| ✅ | `fox run` — text in, text out | done |
 | 🚧 | Async prefetch — overlap layer N+1 with the compute of layer N | next |
 | 🚧 | Layer-contiguous repack (`.foxpack`) for sequential streaming | planned |
 | 🚧 | Vectorised TQ1_0 | planned |
